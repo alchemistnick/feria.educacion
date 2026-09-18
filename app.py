@@ -8,7 +8,7 @@ import io
 st.set_page_config(page_title="Feria de Ciencias 2026", page_icon="🔬", layout="wide")
 
 # ---------------------------------------------------------
-# 1. INICIALIZACIÓN DE FIREBASE VIA STREAMLIT SECRETS
+# 1. INICIALIZACIÓN Y CACHÉ OPTIMIZADO
 # ---------------------------------------------------------
 @st.cache_resource
 def init_firebase():
@@ -53,15 +53,15 @@ def normalizar_lista(val):
     return []
 
 def limpiar_clave_firestore(texto):
-    """Limpia caracteres prohibidos en nombres de claves de Firebase Firestore."""
     clean = str(texto).replace("\n", " ").replace("\r", " ")
     clean = re.sub(r'[.~*/\[\]#$]', '_', clean)
-    return clean.strip()[:150]  # Recorta longitud extrema si la columna es muy larga
+    return clean.strip()[:150]
 
 # ---------------------------------------------------------
-# 2. FUNCIONES DE BASE DE DATOS
+# 2. FUNCIONES DE CONSULTA
 # ---------------------------------------------------------
-def obtener_proyectos():
+@st.cache_data(ttl=120)
+def obtener_proyectos_cached():
     docs = db.collection("proyectos").stream()
     data = []
     for doc in docs:
@@ -70,18 +70,22 @@ def obtener_proyectos():
         data.append(d)
         
     df = pd.DataFrame(data)
-    
     if not df.empty:
         if "nivel_agrupado" not in df.columns:
-            if "nivel_raw" in df.columns:
-                df["nivel_agrupado"] = df["nivel_raw"].apply(agrupar_nivel)
-            elif "nivel" in df.columns:
-                df["nivel_agrupado"] = df["nivel"].apply(agrupar_nivel)
-            else:
-                df["nivel_agrupado"] = "Sin Agrupar"
+            df["nivel_agrupado"] = df["nivel_raw"].apply(agrupar_nivel) if "nivel_raw" in df.columns else "Sin Agrupar"
         if "escuela_estandarizada" not in df.columns:
             df["escuela_estandarizada"] = "Sin Especificar"
     return df
+
+@st.cache_data(ttl=120)
+def obtener_usuarios_cached():
+    docs = db.collection("Usuarios").stream()
+    return pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
+
+@st.cache_data(ttl=60)
+def obtener_asistencias_cached():
+    asist_docs = db.collection("asistencias").stream()
+    return pd.DataFrame([a.to_dict() for a in asist_docs])
 
 def obtener_proyectos_evaluador(email):
     docs = db.collection("proyectos").where("evaluadores_asignados", "array_contains", email).stream()
@@ -92,11 +96,7 @@ def obtener_proyectos_evaluador(email):
         proys.append(d)
     return proys
 
-def obtener_usuarios():
-    docs = db.collection("Usuarios").stream()
-    return pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
-
-def registrar_usuario(email, password, rol, nivel_especialidad, dias_disponibles):
+def autorregistro_usuario(email, password, nombre):
     clean_email = email.strip().lower()
     doc_id = clean_email.replace("@", "_at_").replace(".", "_")
     doc_ref = db.collection("Usuarios").document(doc_id)
@@ -107,11 +107,39 @@ def registrar_usuario(email, password, rol, nivel_especialidad, dias_disponibles
     doc_ref.set({
         "email": clean_email,
         "password": password.strip(),
+        "nombre_completo": nombre.strip(),
+        "rol": "evaluador",
+        "estado_cuenta": "Pendiente",
+        "nivel_especialidad": "Sin Definir",
+        "dias_disponibles": [],
+        "comentarios_interanuales": []
+    })
+    st.cache_data.clear()
+    return True, "Solicitud enviada. Un administrador activará su cuenta en breve."
+
+def aprobar_usuario(doc_id, rol, nivel_especialidad, dias_disponibles):
+    db.collection("Usuarios").document(doc_id).update({
         "rol": rol,
+        "estado_cuenta": "Activo",
         "nivel_especialidad": nivel_especialidad,
         "dias_disponibles": dias_disponibles
     })
-    return True, f"Usuario {clean_email} creado correctamente con ID: {doc_id}."
+    st.cache_data.clear()
+
+def agregar_comentario_evaluador(doc_id, comentario_texto, autor):
+    doc_ref = db.collection("Usuarios").document(doc_id)
+    u = doc_ref.get().to_dict()
+    comentarios = u.get("comentarios_interanuales", [])
+    if not isinstance(comentarios, list):
+        comentarios = []
+    
+    comentarios.append({
+        "fecha": pd.Timestamp.now().strftime("%Y-%m-%d"),
+        "autor": autor,
+        "texto": comentario_texto
+    })
+    doc_ref.update({"comentarios_interanuales": comentarios})
+    st.cache_data.clear()
 
 def guardar_asistencia(proyecto_id, docente, capacitacion, presente):
     db.collection("asistencias").add({
@@ -121,25 +149,23 @@ def guardar_asistencia(proyecto_id, docente, capacitacion, presente):
         "presente": presente,
         "fecha": firestore.SERVER_TIMESTAMP
     })
+    st.cache_data.clear()
 
 def asignar_evaluadores_manual(proyecto_id, lista_evaluadores):
     db.collection("proyectos").document(proyecto_id).update({
         "evaluadores_asignados": lista_evaluadores,
         "estado_evaluacion": "Asignado" if lista_evaluadores else "Pendiente"
     })
+    st.cache_data.clear()
 
 def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
-    proyectos_docs = db.collection("proyectos").stream()
-    proyectos = []
-    for d in proyectos_docs:
-        p_dict = d.to_dict() | {"id_doc": d.id}
-        if "nivel_agrupado" not in p_dict:
-            p_dict["nivel_agrupado"] = agrupar_nivel(p_dict.get("nivel_raw", p_dict.get("nivel", "")))
-        proyectos.append(p_dict)
+    df_p = obtener_proyectos_cached()
+    df_u = obtener_usuarios_cached()
     
-    usuarios_docs = db.collection("Usuarios").where("rol", "==", "evaluador").stream()
-    evaluadores = [u.to_dict() for u in usuarios_docs]
-    
+    if df_p.empty or df_u.empty:
+        return 0, "No hay proyectos o evaluadores cargados."
+        
+    evaluadores = df_u[(df_u["rol"] == "evaluador") & (df_u.get("estado_cuenta", "Activo") == "Activo")].to_dict('records')
     eval_filtrados = [
         e for e in evaluadores 
         if e.get("nivel_especialidad") == filtro_nivel 
@@ -147,16 +173,14 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
     ]
     
     if len(eval_filtrados) < tamano_grupo:
-        return 0, f"No hay suficientes evaluadores de {filtro_nivel} disponibles el día {filtro_dia} para formar {tamano_grupo}s."
+        return 0, f"Insuficientes evaluadores habilitados ({len(eval_filtrados)}) para formar {tamano_grupo}s."
     
-    proyectos_target = [p for p in proyectos if p.get("nivel_agrupado") == filtro_nivel]
-    
+    proyectos_target = df_p[df_p["nivel_agrupado"] == filtro_nivel].to_dict('records')
     asig_count = 0
     batch = db.batch()
     
     for i, p in enumerate(proyectos_target):
         seleccionados = [eval_filtrados[(i*tamano_grupo + j) % len(eval_filtrados)]["email"] for j in range(tamano_grupo)]
-        
         doc_ref = db.collection("proyectos").document(p["id_doc"])
         batch.update(doc_ref, {
             "evaluadores_asignados": seleccionados,
@@ -164,7 +188,6 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
             "dia_evaluacion": filtro_dia
         })
         asig_count += 1
-        
         if asig_count % 400 == 0:
             batch.commit()
             batch = db.batch()
@@ -172,7 +195,8 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
     if asig_count % 400 != 0:
         batch.commit()
         
-    return asig_count, f"Se asignaron exitosamente {asig_count} proyectos de {filtro_nivel} en {tamano_grupo}s para el día {filtro_dia}."
+    st.cache_data.clear()
+    return asig_count, f"Se asignaron exitosamente {asig_count} proyectos de {filtro_nivel}."
 
 def procesar_e_ingresar_csv(df):
     batch = db.batch()
@@ -190,6 +214,7 @@ def procesar_e_ingresar_csv(df):
     c_cue = col_search(['cue'])
     c_nivel = col_search(['nivel educativo', 'nivel'])
     c_docente = col_search(['docente a cargo del proyecto', 'docente'])
+    c_dni_docente = col_search(['dni - docente', 'dni docente', 'dni'])
     c_email = col_search(['correo electrónico - docente', 'email'])
     c_resumen = col_search(['resumen del proyecto', 'resumen'])
     c_pdf = col_search(['subí el proyecto', 'pdf'])
@@ -202,12 +227,7 @@ def procesar_e_ingresar_csv(df):
         escuela_raw = row.get(c_escuela, "") if c_escuela else ""
         nivel_raw = row.get(c_nivel, "") if c_nivel else ""
         
-        # Limpieza de las 127 columnas para Firebase
-        datos_completos_excel = {}
-        for col in df.columns:
-            val = row.get(col)
-            clave_limpia = limpiar_clave_firestore(col)
-            datos_completos_excel[clave_limpia] = "" if pd.isna(val) else str(val).strip()
+        datos_completos_excel = {limpiar_clave_firestore(col): ("" if pd.isna(row.get(col)) else str(row.get(col)).strip()) for col in df.columns}
 
         doc_data = {
             "titulo": str(row.get(c_titulo, "")).strip() if c_titulo else "Sin Título",
@@ -218,6 +238,7 @@ def procesar_e_ingresar_csv(df):
             "nivel_raw": str(nivel_raw),
             "nivel_agrupado": agrupar_nivel(nivel_raw),
             "docente_cargo": str(row.get(c_docente, "")) if c_docente else "",
+            "docente_dni": str(row.get(c_dni_docente, "")) if c_dni_docente else "",
             "docente_email": str(row.get(c_email, "")) if c_email else "",
             "resumen": str(row.get(c_resumen, "")) if c_resumen else "",
             "drive_pdf": str(row.get(c_pdf, "")) if c_pdf else "",
@@ -226,6 +247,7 @@ def procesar_e_ingresar_csv(df):
             "estado_evaluacion": "Pendiente",
             "devolucion": "",
             "dia_evaluacion": "",
+            "anio_edicion": "2026",
             "formulario_respuestas_completas": datos_completos_excel
         }
         
@@ -239,30 +261,55 @@ def procesar_e_ingresar_csv(df):
     if contador % 400 != 0:
         batch.commit()
         
+    st.cache_data.clear()
     return contador
 
 # ---------------------------------------------------------
-# 3. AUTENTICACIÓN
+# 3. AUTENTICACIÓN Y AUTORREGISTRO
 # ---------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 
 if not st.session_state["logged_in"]:
-    st.sidebar.title("🔐 Acceso al Sistema")
-    email = st.sidebar.text_input("Correo electrónico")
-    password = st.sidebar.text_input("Contraseña", type="password")
+    st.sidebar.title("🔬 Portal Feria de Ciencias")
+    modo_acceso = st.sidebar.radio("Acceso", ["Iniciar Sesión", "Registrarse (Nuevo Evaluador)"])
     
-    if st.sidebar.button("Iniciar Sesión"):
-        users = db.collection("Usuarios").where("email", "==", email.strip().lower()).where("password", "==", password.strip()).get()
-        if users:
-            u_data = users[0].to_dict()
-            st.session_state["logged_in"] = True
-            st.session_state["user_email"] = u_data["email"]
-            st.session_state["user_role"] = u_data["rol"]
-            st.rerun()
-        else:
-            st.sidebar.error("Credenciales incorrectas")
-    st.info("Por favor, ingrese sus credenciales para continuar.")
+    if modo_acceso == "Iniciar Sesión":
+        email = st.sidebar.text_input("Correo electrónico")
+        password = st.sidebar.text_input("Contraseña", type="password")
+        
+        if st.sidebar.button("Entrar", type="primary"):
+            users = db.collection("Usuarios").where("email", "==", email.strip().lower()).where("password", "==", password.strip()).get()
+            if users:
+                u_data = users[0].to_dict()
+                estado = u_data.get("estado_cuenta", "Activo")
+                if estado == "Pendiente":
+                    st.sidebar.warning("Su cuenta aún está pendiente de activación por un Administrador.")
+                else:
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_email"] = u_data["email"]
+                    st.session_state["user_role"] = u_data["rol"]
+                    st.session_state["user_doc_id"] = users[0].id
+                    st.rerun()
+            else:
+                st.sidebar.error("Credenciales incorrectas")
+    else:
+        st.sidebar.subheader("➕ Solicitud de Registro")
+        reg_nombre = st.sidebar.text_input("Nombre y Apellido")
+        reg_email = st.sidebar.text_input("Correo electrónico")
+        reg_pass = st.sidebar.text_input("Contraseña deseada", type="password")
+        
+        if st.sidebar.button("Enviar Registro"):
+            if reg_email and reg_pass and reg_nombre:
+                exito, msg = autorregistro_usuario(reg_email, reg_pass, reg_nombre)
+                if exito:
+                    st.sidebar.success(msg)
+                else:
+                    st.sidebar.error(msg)
+            else:
+                st.sidebar.warning("Complete todos los campos.")
+                
+    st.info("Por favor, ingrese sus credenciales para acceder al sistema.")
     st.stop()
 
 # ---------------------------------------------------------
@@ -281,30 +328,30 @@ if st.sidebar.button("Cerrar Sesión"):
 # --- VISTA: ADMIN & REFERENTE ---
 if rol in ["admin", "referente"]:
     st.title(f"📊 Panel de Gestión Feria de Ciencias - {rol.capitalize()}")
-    df_proyectos = obtener_proyectos()
+    df_proyectos = obtener_proyectos_cached()
 
-    tabs_list = ["📌 Fichas de Proyectos", "🎟️ Asistencia", "👥 Asignación y Duplas", "📊 Reportes Personalizados"]
+    tabs_list = ["📌 Fichas de Proyectos", "🎟️ Asistencia y Certificados", "👥 Asignación y Duplas", "📊 Reportes Personalizados"]
     if rol == "admin":
         tabs_list.insert(0, "📤 Cargar CSV Forms")
-        tabs_list.append("👤 Registrar Usuarios / Evaluadores")
+        tabs_list.append("🏅 Ficha Evaluadores & Historial")
+        tabs_list.append("👤 Solicitudes & Usuarios")
         
     tabs = st.tabs(tabs_list)
 
-    # --- TAB EXCLUSIVA ADMIN: CARGA DE CSV ---
+    # --- TAB ADMIN: CARGA DE CSV ---
     if rol == "admin":
         with tabs[0]:
             st.subheader("Carga Masiva de Respuestas de Forms (.csv / .xlsx)")
             archivo_subido = st.file_uploader("Seleccionar archivo CSV o Excel", type=["csv", "xlsx"])
-            
             if archivo_subido is not None:
                 try:
                     df_raw = pd.read_csv(archivo_subido) if archivo_subido.name.endswith('.csv') else pd.read_excel(archivo_subido)
-                    st.write(f"📁 **Archivo detectado:** `{archivo_subido.name}` con **{len(df_raw)}** filas y **{len(df_raw.columns)}** columnas.")
+                    st.write(f"📁 **Archivo detectado:** `{archivo_subido.name}` con **{len(df_raw)}** filas.")
                     
                     if st.button("🚀 Confirmar e Importar a Firebase", type="primary"):
-                        with st.spinner("Procesando proyectos y guardando en la colección /proyectos..."):
-                            total_cargados = procesar_e_ingresar_csv(df_raw)
-                            st.success(f"¡Importación exitosa! Se subieron {total_cargados} proyectos a la colección /proyectos.")
+                        with st.spinner("Procesando proyectos..."):
+                            total = procesar_e_ingresar_csv(df_raw)
+                            st.toast("✅ ¡Proyectos cargados con éxito!", icon="🎉")
                             st.rerun()
                 except Exception as e:
                     st.error(f"Error al procesar el archivo: {e}")
@@ -313,7 +360,6 @@ if rol in ["admin", "referente"]:
     idx_proj = 1 if rol == "admin" else 0
     with tabs[idx_proj]:
         st.subheader("Fichas de Proyectos Inscritos")
-        
         if not df_proyectos.empty:
             col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1:
@@ -338,51 +384,90 @@ if rol in ["admin", "referente"]:
             for idx, p in df_cards.iterrows():
                 with st.expander(f"🏷️ [{p.get('id_doc')}] {p.get('titulo', 'Sin Título')} | Nivel: {p.get('nivel_agrupado', 'N/A')}"):
                     evals = normalizar_lista(p.get('evaluadores_asignados'))
-                    
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"**Escuela:** {p.get('escuela_estandarizada', 'N/A')}")
                         st.markdown(f"**Distrito Escolar:** {p.get('distrito', 'N/A')} | **CUE:** {p.get('cue', 'N/A')}")
-                        st.markdown(f"**Nivel Original:** {p.get('nivel_raw', p.get('nivel', 'N/A'))}")
-                        st.markdown(f"**Docente a Cargo:** {p.get('docente_cargo', 'N/A')} ({p.get('docente_email', 'N/A')})")
+                        st.markdown(f"**Docente a Cargo:** {p.get('docente_cargo', 'N/A')} (DNI: {p.get('docente_dni', 'N/A')})")
                     with c2:
                         st.markdown(f"**Evaluadores Asignados:** {', '.join(evals) if evals else '⚠️ Sin Asignar'}")
-                        st.markdown(f"**Día de Evaluación:** {p.get('dia_evaluacion', 'Sin Definir')}")
-                        st.markdown(f"**Estado de Evaluación:** {p.get('estado_evaluacion', 'Pendiente')}")
+                        st.markdown(f"**Estado:** {p.get('estado_evaluacion', 'Pendiente')}")
                     
                     st.markdown("**Resumen:**")
                     st.info(p.get('resumen', 'Sin resumen cargado.'))
                     
-                    st.markdown("**Recursos Adjuntos:**")
                     r1, r2 = st.columns(2)
-                    if p.get('drive_pdf'):
-                        r1.markdown(f"📄 [Ver Informe Pedagógico / PDF]({p.get('drive_pdf')})")
-                    if p.get('youtube_url'):
-                        r2.markdown(f"🎬 [Ver Video en YouTube]({p.get('youtube_url')})")
+                    if p.get('drive_pdf'): r1.markdown(f"📄 [Ver PDF]({p.get('drive_pdf')})")
+                    if p.get('youtube_url'): r2.markdown(f"🎬 [Ver Video]({p.get('youtube_url')})")
                     
                     if p.get('formulario_respuestas_completas'):
                         with st.popover("📋 Ver todas las respuestas del formulario (127 campos)"):
                             st.json(p.get('formulario_respuestas_completas'))
 
                     if rol == "admin" and p.get('devolucion'):
-                        st.markdown("**Devolución Cualitativa de Evaluación:**")
+                        st.markdown("**Devolución Cualitativa:**")
                         st.success(p.get('devolucion'))
         else:
-            st.info("No hay proyectos cargados. Podés volver a subir el archivo en la pestaña 'Cargar CSV Forms'.")
+            st.info("No hay proyectos cargados.")
 
-    # --- TAB ASISTENCIA ---
+    # --- TAB ASISTENCIA (BUSCADOR AVANZADO POR ID, NOMBRE Y DNI) ---
     idx_asist = 2 if rol == "admin" else 1
     with tabs[idx_asist]:
         st.subheader("Registro de Asistencia a Capacitaciones")
+        
         if not df_proyectos.empty:
-            proj_id = st.selectbox("Seleccionar Proyecto", df_proyectos['id_doc'].tolist())
-            docente_nom = st.text_input("Nombre / DNI del Docente")
-            cap_nom = st.selectbox("Instancia", ["Capacitación 1 - General", "Capacitación 2 - Metodología", "Capacitación 3 - Stand"])
-            pres = st.checkbox("Presente", value=True)
+            st.markdown("##### 🔍 Búsqueda Avanzada de Proyectos / Docentes")
             
-            if st.button("Guardar Asistencia"):
-                guardar_asistencia(proj_id, docente_nom, cap_nom, pres)
-                st.success("Asistencia registrada en Firebase.")
+            # Generar opciones combinadas para el buscador: ID + Título + DNI Docente
+            opciones_busqueda = []
+            mapa_proyectos = {}
+            
+            for idx, p in df_proyectos.iterrows():
+                p_id = str(p.get("id_doc", ""))
+                p_tit = str(p.get("titulo", "Sin Título"))
+                p_doc = str(p.get("docente_cargo", ""))
+                p_dni = str(p.get("docente_dni", ""))
+                
+                label = f"{p_id} | {p_tit[:40]}... | Docente: {p_doc} (DNI: {p_dni})"
+                opciones_busqueda.append(label)
+                mapa_proyectos[label] = p
+                
+            seleccion_label = st.selectbox(
+                "Buscar Proyecto por Nombre, ID o DNI de Docente:",
+                options=opciones_busqueda
+            )
+            
+            proyecto_sel = mapa_proyectos[seleccion_label]
+            
+            st.divider()
+            col_regist, col_cond = st.columns([1, 1])
+            
+            with col_regist:
+                st.markdown("##### 🎟️ Registrar Asistencia")
+                st.write(f"**Proyecto:** `{proyecto_sel.get('id_doc')}` - {proyecto_sel.get('titulo')}")
+                st.write(f"**Docente Inscrito:** {proyecto_sel.get('docente_cargo')} (DNI: {proyecto_sel.get('docente_dni')})")
+                
+                docente_asistente = st.text_input("Nombre / DNI del Docente Asistente", value=f"{proyecto_sel.get('docente_cargo')} - {proyecto_sel.get('docente_dni')}")
+                cap_nom = st.selectbox("Instancia de Capacitación", ["Capacitación 1 - General", "Capacitación 2 - Metodología", "Capacitación 3 - Stand"])
+                pres = st.checkbox("Presente", value=True)
+                
+                if st.button("Guardar Asistencia", type="primary"):
+                    guardar_asistencia(proyecto_sel.get('id_doc'), docente_asistente, cap_nom, pres)
+                    st.toast(f"✅ Asistencia registrada", icon="💾")
+                    st.success("Guardado con éxito en Firebase.")
+
+            with col_cond:
+                st.markdown("##### 📜 Reglas de Certificación de Feria")
+                min_asist_proy = st.number_input("Capacitaciones mínimas por Proyecto", min_value=1, max_value=5, value=1)
+                
+                df_asist_all = obtener_asistencias_cached()
+                if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
+                    asist_proy = df_asist_all[df_asist_all["proyecto_id"] == proyecto_sel.get('id_doc')]
+                    st.markdown(f"**Historial de Asistencias del Proyecto `{proyecto_sel.get('id_doc')}`:**")
+                    if not asist_proy.empty:
+                        st.dataframe(asist_proy[["capacitacion", "docente", "presente", "fecha"]], use_container_width=True)
+                    else:
+                        st.info("Sin asistencias registradas para este proyecto aún.")
 
     # --- TAB ASIGNACIÓN DE EVALUADORES Y DUPLAS ---
     idx_eval = 3 if rol == "admin" else 2
@@ -392,25 +477,25 @@ if rol in ["admin", "referente"]:
         st.markdown("#### ⚡ Asignación Automática")
         col_a1, col_a2, col_a3, col_a4 = st.columns(4)
         with col_a1:
-            modo_grupo = st.radio("Formato de Evaluación", ["Duplas (2)", "Triejas (3)"])
+            modo_grupo = st.radio("Formato", ["Duplas (2)", "Triejas (3)"])
             tamano = 2 if "Duplas" in modo_grupo else 3
         with col_a2:
-            auto_nivel = st.selectbox("Seleccionar Nivel", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"])
+            auto_nivel = st.selectbox("Nivel", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"])
         with col_a3:
-            auto_dia = st.selectbox("Día de Evaluación", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"])
+            auto_dia = st.selectbox("Día", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"])
         with col_a4:
             st.write("")
             st.write("")
-            if st.button("Generar Grupos y Asignar", type="primary"):
+            if st.button("Generar y Asignar", type="primary"):
                 cant, msg = asignacion_automatica(tamano, auto_nivel, auto_dia)
                 if cant > 0:
-                    st.success(msg)
+                    st.toast("✅ Asignación automática completada", icon="🎯")
                     st.rerun()
                 else:
                     st.error(msg)
 
         st.divider()
-        st.markdown("#### 🛠️ Asignación / Ajuste Manual de Proyectos")
+        st.markdown("#### 🛠️ Asignación / Ajuste Manual")
         if not df_proyectos.empty:
             col_m1, col_m2 = st.columns(2)
             with col_m1:
@@ -419,30 +504,27 @@ if rol in ["admin", "referente"]:
                 st.caption(f"Nivel: **{p_selected.get('nivel_agrupado')}** | Escuela: **{p_selected.get('escuela_estandarizada')}**")
             
             with col_m2:
-                df_users = obtener_usuarios()
-                evaluadores_list = []
-                if not df_users.empty and "rol" in df_users.columns:
-                    evaluadores_list = df_users[df_users["rol"] == "evaluador"]["email"].tolist()
-                
+                df_users = obtener_usuarios_cached()
+                evaluadores_list = df_users[(df_users["rol"] == "evaluador") & (df_users.get("estado_cuenta", "Activo") == "Activo")]["email"].tolist() if not df_users.empty else []
                 evals_actuales = normalizar_lista(p_selected.get('evaluadores_asignados'))
 
                 evals_seleccionados = st.multiselect(
-                    "Seleccionar Evaluadores (Dupla o Trieja)", 
+                    "Evaluadores Asignados", 
                     options=evaluadores_list, 
                     default=[e for e in evals_actuales if e in evaluadores_list]
                 )
 
             if st.button("Guardar Asignación Manual"):
                 asignar_evaluadores_manual(proj_id_asig, evals_seleccionados)
-                st.success(f"Asignación actualizada para {proj_id_asig}.")
+                st.toast("✅ Asignación guardada", icon="💾")
                 st.rerun()
 
     # --- TAB REPORTES PERSONALIZADOS ---
     idx_rep = 4 if rol == "admin" else 3
     with tabs[idx_rep]:
-        st.subheader("Generación y Descarga de Reportes")
+        st.subheader("Generación y Descarga de Reportes Excel")
         
-        tipo_reporte = st.selectbox("Seleccionar Tipo de Reporte", [
+        tipo_reporte = st.selectbox("Tipo de Reporte", [
             "Reporte Consolidado General",
             "Reporte por Nivel Educativo (Inicial / Primaria / Secundaria)",
             "Reporte de Asignación de Evaluadores y Duplas",
@@ -458,24 +540,18 @@ if rol in ["admin", "referente"]:
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 if tipo_reporte == "Reporte Consolidado General":
                     df_rep.to_excel(writer, sheet_name='Proyectos_General', index=False)
-                    
                 elif tipo_reporte == "Reporte por Nivel Educativo (Inicial / Primaria / Secundaria)":
                     for n in ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"]:
                         sub_df = df_rep[df_rep['nivel_agrupado'] == n]
                         sub_df.to_excel(writer, sheet_name=n.replace(" / ", "_"), index=False)
-                        
                 elif tipo_reporte == "Reporte de Asignación de Evaluadores y Duplas":
                     cols_eval = ["id_doc", "titulo", "nivel_agrupado", "escuela_estandarizada", "evaluadores_asignados", "dia_evaluacion", "estado_evaluacion"]
                     cols_exist = [c for c in cols_eval if c in df_rep.columns]
                     df_rep[cols_exist].to_excel(writer, sheet_name='Asignaciones', index=False)
-                    
                 elif tipo_reporte == "Reporte de Asistencia a Capacitaciones":
-                    asist_docs = db.collection("asistencias").stream()
-                    df_asist = pd.DataFrame([a.to_dict() for a in asist_docs])
+                    df_asist = obtener_asistencias_cached()
                     if not df_asist.empty:
                         df_asist.to_excel(writer, sheet_name='Asistencias', index=False)
-                    else:
-                        pd.DataFrame([{"Mensaje": "Sin asistencias cargadas"}]).to_excel(writer, sheet_name='Asistencias', index=False)
 
             st.download_button(
                 label=f"📥 Descargar {tipo_reporte} (.xlsx)",
@@ -484,38 +560,95 @@ if rol in ["admin", "referente"]:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-    # --- TAB REGISTRO DE USUARIOS Y DISPONIBILIDAD HORARIA ---
+    # --- TAB ADMIN EXCLUSIVA: FICHA DE DESEMPEÑO DE EVALUADORES ---
     if rol == "admin":
         with tabs[5]:
-            st.subheader("Alta de Evaluadores y Carga de Disponibilidad")
+            st.subheader("🏅 Ficha de Desempeño e Historial de Evaluadores")
+            df_u = obtener_usuarios_cached()
             
-            col_u1, col_u2 = st.columns(2)
-            with col_u1:
-                st.markdown("##### ➕ Registrar Evaluador / Referente")
-                nuevo_email = st.text_input("Correo electrónico")
-                nuevo_pass = st.text_input("Contraseña", type="password")
-                nuevo_rol = st.selectbox("Rol", ["evaluador", "referente", "admin"])
-                
-                nivel_esp = st.selectbox("Nivel de Especialidad", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"])
-                dias_disp = st.multiselect("Días Disponibles", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"], default=["Lunes", "Martes"])
-                
-                if st.button("Crear Usuario", type="primary"):
-                    if nuevo_email and nuevo_pass:
-                        exito, mensaje = registrar_usuario(nuevo_email, nuevo_pass, nuevo_rol, nivel_esp, dias_disp)
-                        if exito:
-                            st.success(mensaje)
-                            st.rerun()
-                        else:
-                            st.error(mensaje)
+            if not df_u.empty:
+                df_evals = df_u[df_u["rol"] == "evaluador"]
+                if not df_evals.empty:
+                    eval_sel_email = st.selectbox("Seleccionar Evaluador para ver Ficha:", df_evals["email"].tolist())
+                    
+                    eval_data = df_evals[df_evals["email"] == eval_sel_email].iloc[0]
+                    eval_id = eval_data["id_doc"]
+                    
+                    st.divider()
+                    st.markdown(f"### 📋 Legajo de Evaluador: `{eval_data.get('nombre_completo', eval_sel_email)}`")
+                    
+                    col_info1, col_info2, col_info3 = st.columns(3)
+                    with col_info1:
+                        st.write(f"**Email:** {eval_sel_email}")
+                        st.write(f"**Estado:** `{eval_data.get('estado_cuenta', 'Activo')}`")
+                    with col_info2:
+                        st.write(f"**Especialidad:** {eval_data.get('nivel_especialidad', 'N/A')}")
+                        st.write(f"**Días Disponibles:** {', '.join(eval_data.get('dias_disponibles', []))}")
+                    with col_info3:
+                        # Calcular proyectos evaluados en la edición actual
+                        cant_evals_2026 = len(df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)]) if not df_proyectos.empty else 0
+                        st.metric("Proyectos Asignados (2026)", cant_evals_2026)
+
+                    st.markdown("#### 📜 Historial Interanual de Proyectos Evaluados")
+                    # Proyectos asignados este año
+                    proys_evaluador = df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)] if not df_proyectos.empty else pd.DataFrame()
+                    if not proys_evaluador.empty:
+                        cols_m = [c for c in ["id_doc", "titulo", "nivel_agrupado", "escuela_estandarizada", "estado_evaluacion", "anio_edicion"] if c in proys_evaluador.columns]
+                        st.dataframe(proys_evaluador[cols_m], use_container_width=True)
                     else:
-                        st.warning("Completar todos los campos obligatorios.")
+                        st.info("Sin registros de proyectos evaluados en la edición actual.")
+
+                    st.divider()
+                    st.markdown("#### 💬 Bitácora / Comentarios de Desempeño Interanual")
+                    
+                    comentarios = eval_data.get("comentarios_interanuales", [])
+                    if isinstance(comentarios, list) and comentarios:
+                        for c in comentarios:
+                            st.write(f"📌 **[{c.get('fecha')}] ({c.get('autor')}):** {c.get('texto')}")
+                    else:
+                        st.info("No hay comentarios asentados aún para este evaluador.")
                         
-            with col_u2:
-                st.markdown("##### 📋 Nómina de Evaluadores y Registrados")
-                df_usuarios = obtener_usuarios()
-                if not df_usuarios.empty:
-                    cols_usr = [c for c in ["id_doc", "email", "rol", "nivel_especialidad", "dias_disponibles"] if c in df_usuarios.columns]
-                    st.dataframe(df_usuarios[cols_usr], use_container_width=True)
+                    with st.form(key=f"form_comentario_{eval_id}"):
+                        nuevo_comentario = st.text_area("Agregar observación sobre el desempeño para ediciones futuras:")
+                        submit_com = st.form_submit_button("Guardar Comentario en Ficha")
+                        
+                        if submit_com and nuevo_comentario:
+                            agregar_comentario_evaluador(eval_id, nuevo_comentario, user_email)
+                            st.toast("✅ Comentario guardado en legajo", icon="📝")
+                            st.rerun()
+
+    # --- TAB ADMIN EXCLUSIVA: HABILITACIÓN DE REGISTROS ---
+    if rol == "admin":
+        with tabs[6]:
+            st.subheader("👤 Solicitudes de Registro y Control de Usuarios")
+            df_u = obtener_usuarios_cached()
+            
+            if not df_u.empty:
+                pendientes = df_u[df_u.get("estado_cuenta", "Activo") == "Pendiente"]
+                
+                st.markdown("##### ⏳ Solicitudes Pendientes de Aprobación")
+                if not pendientes.empty:
+                    for idx, u in pendientes.iterrows():
+                        with st.expander(f"👤 Solicitud: {u.get('nombre_completo', 'Sin Nombre')} ({u.get('email')})"):
+                            col_p1, col_p2, col_p3 = st.columns(3)
+                            with col_p1:
+                                rol_aprob = st.selectbox("Asignar Rol", ["evaluador", "referente", "admin"], key=f"r_{u['id_doc']}")
+                            with col_p2:
+                                nivel_aprob = st.selectbox("Especialidad Nivel", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"], key=f"n_{u['id_doc']}")
+                            with col_p3:
+                                dias_aprob = st.multiselect("Días Disponibles", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"], default=["Lunes"], key=f"d_{u['id_doc']}")
+                                
+                            if st.button("✅ Habilitar y Activar Cuenta", key=f"btn_ap_{u['id_doc']}", type="primary"):
+                                aprobar_usuario(u['id_doc'], rol_aprob, nivel_aprob, dias_aprob)
+                                st.toast(f"✅ Cuenta activada para {u.get('email')}", icon="🎉")
+                                st.rerun()
+                else:
+                    st.success("No hay solicitudes de registro pendientes.")
+                
+                st.divider()
+                st.markdown("##### 📋 Todos los Usuarios Registrados")
+                cols_u = [c for c in ["id_doc", "email", "nombre_completo", "rol", "estado_cuenta", "nivel_especialidad"] if c in df_u.columns]
+                st.dataframe(df_u[cols_u], use_container_width=True)
 
 # --- VISTA: EVALUADOR ---
 elif rol == "evaluador":
@@ -527,7 +660,6 @@ elif rol == "evaluador":
         for p in proyectos:
             with st.expander(f"📌 [{p.get('id_doc')}] {p.get('titulo', 'Sin Título')}"):
                 evals = normalizar_lista(p.get('evaluadores_asignados'))
-                
                 st.write(f"**Nivel Educativo:** {p.get('nivel_agrupado', 'N/A')}")
                 st.write(f"**Escuela:** {p.get('escuela_estandarizada', 'N/A')}")
                 st.write(f"**Evaluadores del Equipo:** {', '.join(evals)}")
@@ -537,9 +669,9 @@ elif rol == "evaluador":
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if p.get('drive_pdf'): st.markdown(f"📄 [Abrir Informe Pedagógico / PDF]({p.get('drive_pdf')})")
+                    if p.get('drive_pdf'): st.markdown(f"📄 [Abrir PDF]({p.get('drive_pdf')})")
                 with col2:
-                    if p.get('youtube_url'): st.markdown(f"🎬 [Ver Video en YouTube]({p.get('youtube_url')})")
+                    if p.get('youtube_url'): st.markdown(f"🎬 [Ver Video]({p.get('youtube_url')})")
                 
                 st.divider()
                 st.subheader("Devolución Pedagógica Cualitativa")
@@ -556,6 +688,8 @@ elif rol == "evaluador":
                         "devolucion": devolucion,
                         "estado_evaluacion": "Evaluado"
                     })
-                    st.success("Devolución guardada en Firebase.")
+                    st.cache_data.clear()
+                    st.toast("✅ Devolución guardada con éxito", icon="💾")
+                    st.success("Guardado en Firebase.")
     else:
         st.info("No tenés proyectos asignados actualmente.")
