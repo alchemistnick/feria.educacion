@@ -58,7 +58,7 @@ def limpiar_clave_firestore(texto):
     return clean.strip()[:150]
 
 # ---------------------------------------------------------
-# 2. FUNCIONES DE CONSULTA
+# 2. FUNCIONES DE CONSULTA Y GESTIÓN
 # ---------------------------------------------------------
 @st.cache_data(ttl=120)
 def obtener_proyectos_cached():
@@ -145,6 +145,27 @@ def aprobar_usuario(doc_id, rol, nivel_especialidad, dias_disponibles):
         "dias_disponibles": dias_disponibles
     })
     st.cache_data.clear()
+
+def eliminar_usuario_firestore(doc_id):
+    db.collection("Usuarios").document(doc_id).delete()
+    st.cache_data.clear()
+
+def desasignar_evaluador_de_proyectos(email, anio_edicion):
+    docs = db.collection("proyectos").where("evaluadores_asignados", "array_contains", email).where("anio_edicion", "==", str(anio_edicion).strip()).stream()
+    batch = db.batch()
+    cont = 0
+    for doc in docs:
+        d = doc.to_dict()
+        actuales = d.get("evaluadores_asignados", [])
+        nuevos = [e for e in actuales if e != email]
+        batch.update(doc.reference, {
+            "evaluadores_asignados": nuevos,
+            "estado_evaluacion": "Asignado" if nuevos else "Pendiente"
+        })
+        cont += 1
+    batch.commit()
+    st.cache_data.clear()
+    return cont
 
 def actualizar_dias_evaluador(doc_id, nuevos_dias):
     db.collection("Usuarios").document(doc_id).update({
@@ -585,10 +606,10 @@ if rol in ["admin", "referente"]:
                 )
     tab_idx += 1
 
-    # --- TAB EXCLUSIVA ADMIN: ASIGNACIÓN DE EVALUADORES ---
+    # --- TAB EXCLUSIVA ADMIN: ASIGNACIÓN Y DESASIGNACIÓN DE EVALUADORES ---
     if rol == "admin":
         with tabs[tab_idx]:
-            st.subheader(f"Asignación de Evaluadores ({anio_edicion_actual})")
+            st.subheader(f"Asignación / Desasignación de Evaluadores ({anio_edicion_actual})")
             st.markdown("#### ⚡ Asignación Automática")
             col_a1, col_a2, col_a3, col_a4 = st.columns(4)
             with col_a1:
@@ -610,7 +631,7 @@ if rol in ["admin", "referente"]:
                         st.error(msg)
 
             st.divider()
-            st.markdown("#### 🛠️ Asignación / Ajuste Manual")
+            st.markdown("#### 🛠️ Asignación / Desasignación Manual por Proyecto")
             if not df_proyectos.empty:
                 col_m1, col_m2 = st.columns(2)
                 with col_m1:
@@ -624,18 +645,25 @@ if rol in ["admin", "referente"]:
                     evals_actuales = normalizar_lista(p_selected.get('evaluadores_asignados'))
 
                     evals_seleccionados = st.multiselect(
-                        "Evaluadores Asignados", 
+                        "Evaluadores Asignados (Borre del cuadro para desasignar):", 
                         options=evaluadores_list, 
                         default=[e for e in evals_actuales if e in evaluadores_list]
                     )
 
-                if st.button("Guardar Asignación Manual"):
-                    asignar_evaluadores_manual(proj_id_asig, evals_seleccionados)
-                    st.toast("✅ Asignación guardada", icon="💾")
-                    st.rerun()
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    if st.button("💾 Guardar Cambios de Asignación"):
+                        asignar_evaluadores_manual(proj_id_asig, evals_seleccionados)
+                        st.toast("✅ Asignación actualizada", icon="💾")
+                        st.rerun()
+                with col_b2:
+                    if st.button("❌ Quitar Todos los Evaluadores de este Proyecto"):
+                        asignar_evaluadores_manual(proj_id_asig, [])
+                        st.toast("🚫 Proyecto desasignado por completo", icon="🧹")
+                        st.rerun()
         tab_idx += 1
 
-    # --- TAB REPORTES PERSONALIZADOS CON FILTROS DE EVENTO/CAPACITACIÓN ---
+    # --- TAB REPORTES PERSONALIZADOS ---
     with tabs[tab_idx]:
         st.subheader(f"Reportes Excel - Edición {anio_edicion_actual}")
         tipo_reporte = st.selectbox("Tipo de Reporte", [
@@ -681,10 +709,10 @@ if rol in ["admin", "referente"]:
             )
     tab_idx += 1
 
-    # --- TAB EXCLUSIVA ADMIN: FICHA DE EVALUADORES Y EDICIÓN DE DÍAS ---
+    # --- TAB EXCLUSIVA ADMIN: FICHA DE EVALUADORES Y DESASIGNACIÓN MASIVA ---
     if rol == "admin":
         with tabs[tab_idx]:
-            st.subheader("🏅 Ficha de Desempeño, Días y CV de Evaluadores")
+            st.subheader("🏅 Ficha de Desempeño, Días, CV y Desasignaciones")
             df_u = obtener_usuarios_cached()
             
             if not df_u.empty:
@@ -715,7 +743,13 @@ if rol in ["admin", "referente"]:
                         cant_evals_actual = len(df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)]) if not df_proyectos.empty else 0
                         st.metric(f"Proyectos Asignados ({anio_edicion_actual})", cant_evals_actual)
 
-                    # Edición manual de días desde la ficha
+                    # Botón de desasignación masiva
+                    if cant_evals_actual > 0:
+                        if st.button(f"🚫 Desasignar a {eval_sel_email} de TODOS los proyectos de {anio_edicion_actual}"):
+                            cant_desasig = desasignar_evaluador_de_proyectos(eval_sel_email, anio_edicion_actual)
+                            st.toast(f"✅ Se quitó al evaluador de {cant_desasig} proyectos", icon="🧹")
+                            st.rerun()
+
                     st.markdown("#### ✏️ Modificar Días Disponibles del Evaluador")
                     dias_editados = st.multiselect(
                         "Seleccionar días de disponibilidad:",
@@ -755,7 +789,7 @@ if rol in ["admin", "referente"]:
                             st.rerun()
         tab_idx += 1
 
-    # --- TAB EXCLUSIVA ADMIN: SOLICITUDES Y REGISTRO DE USUARIOS ---
+    # --- TAB EXCLUSIVA ADMIN: SOLICITUDES, USUARIOS Y ELIMINACIÓN DE CUENTAS ---
     if rol == "admin":
         with tabs[tab_idx]:
             st.subheader("👤 Solicitudes de Registro y Control de Usuarios")
@@ -787,11 +821,22 @@ if rol in ["admin", "referente"]:
                 cols_u = [c for c in ["id_doc", "email", "nombre_completo", "rol", "estado_cuenta", "nivel_especialidad"] if c in df_u.columns]
                 st.dataframe(df_u[cols_u], use_container_width=True)
 
+                st.divider()
+                st.markdown("##### 🗑️ Eliminar Cuenta de Usuario")
+                user_del_email = st.selectbox("Seleccionar cuenta a eliminar:", df_u["email"].tolist(), key="sel_del_user")
+                u_del_data = df_u[df_u["email"] == user_del_email].iloc[0]
+                
+                st.warning(f"⚠️ **Atención:** Se eliminará de forma permanente el usuario `{user_del_email}` ({u_del_data.get('nombre_completo')}).")
+                
+                if st.button(f"🗑️ Confirmar Eliminar Cuenta `{user_del_email}`", type="primary"):
+                    eliminar_usuario_firestore(u_del_data["id_doc"])
+                    st.toast("✅ Usuario eliminado correctamente", icon="🗑️")
+                    st.rerun()
+
 # 2. PERFIL: EVALUADOR
 elif rol == "evaluador":
     st.title(f"📝 Portal de Evaluación Pedagógica ({anio_edicion_actual})")
     
-    # Módulo de Carga de CV en el perfil del evaluador
     with st.sidebar.expander("📄 Mi Curriculum Vitae (CV)"):
         cv_link_input = st.text_input("Enlace a CV (Google Drive / Dropbox):")
         if st.button("Guardar Enlace CV"):
