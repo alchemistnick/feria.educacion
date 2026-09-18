@@ -7,7 +7,7 @@ import io
 st.set_page_config(page_title="Feria de Ciencias 2026", page_icon="🔬", layout="wide")
 
 # ---------------------------------------------------------
-# 1. INICIALIZACIÓN DE FIREBASE (CORREGIDO)
+# 1. INICIALIZACIÓN DE FIREBASE VIA STREAMLIT SECRETS
 # ---------------------------------------------------------
 @st.cache_resource
 def init_firebase():
@@ -118,7 +118,7 @@ def procesar_e_ingresar_csv(df):
     return contador
 
 # ---------------------------------------------------------
-# 3. AUTENTICACIÓN
+# 3. AUTENTICACIÓN (USA LA COLECCIÓN "Usuarios" CON MAYÚSCULA)
 # ---------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -129,7 +129,8 @@ if not st.session_state["logged_in"]:
     password = st.sidebar.text_input("Contraseña", type="password")
     
     if st.sidebar.button("Iniciar Sesión"):
-        users = db.collection("usuarios").where("email", "==", email).where("password", "==", password).get()
+        # Consulta en la colección "Usuarios" (con Mayúscula tal como figura en Firebase)
+        users = db.collection("Usuarios").where("email", "==", email).where("password", "==", password).get()
         if users:
             u_data = users[0].to_dict()
             st.session_state["logged_in"] = True
