@@ -12,7 +12,6 @@ st.set_page_config(page_title="Feria de Ciencias 2026", page_icon="🔬", layout
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
-        # Convertimos la sección TOML de Streamlit Secrets directamente a diccionario
         key_dict = dict(st.secrets["textkey"])
         cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
@@ -44,6 +43,23 @@ def obtener_proyectos():
 def obtener_proyectos_evaluador(email):
     docs = db.collection("proyectos").where("evaluador_asignado", "==", email).stream()
     return [doc.to_dict() | {"id_doc": doc.id} for doc in docs]
+
+def obtener_usuarios():
+    docs = db.collection("Usuarios").stream()
+    return pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
+
+def registrar_usuario(email, password, rol):
+    # Verificar si el email ya existe
+    existe = db.collection("Usuarios").where("email", "==", email).get()
+    if existe:
+        return False, "El correo electrónico ya se encuentra registrado."
+    
+    db.collection("Usuarios").add({
+        "email": email.strip().lower(),
+        "password": password.strip(),
+        "rol": rol
+    })
+    return True, f"Usuario {email} creado exitosamente como {rol.upper()}."
 
 def guardar_asistencia(proyecto_id, docente, capacitacion, presente):
     db.collection("asistencias").add({
@@ -118,7 +134,7 @@ def procesar_e_ingresar_csv(df):
     return contador
 
 # ---------------------------------------------------------
-# 3. AUTENTICACIÓN (USA LA COLECCIÓN "Usuarios" CON MAYÚSCULA)
+# 3. AUTENTICACIÓN
 # ---------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -129,8 +145,7 @@ if not st.session_state["logged_in"]:
     password = st.sidebar.text_input("Contraseña", type="password")
     
     if st.sidebar.button("Iniciar Sesión"):
-        # Consulta en la colección "Usuarios" (con Mayúscula tal como figura en Firebase)
-        users = db.collection("Usuarios").where("email", "==", email).where("password", "==", password).get()
+        users = db.collection("Usuarios").where("email", "==", email.strip().lower()).where("password", "==", password.strip()).get()
         if users:
             u_data = users[0].to_dict()
             st.session_state["logged_in"] = True
@@ -163,6 +178,7 @@ if rol in ["admin", "referente"]:
     tabs_list = ["📋 Proyectos", "🎟️ Asistencia", "👥 Evaluadores", "📥 Reportes Excel"]
     if rol == "admin":
         tabs_list.insert(0, "📤 Cargar CSV Forms")
+        tabs_list.append("👤 Registrar Usuarios")
         
     tabs = st.tabs(tabs_list)
 
@@ -230,7 +246,17 @@ if rol in ["admin", "referente"]:
         st.subheader("Asignación de Evaluadores")
         if not df_proyectos.empty:
             proj_id_asig = st.selectbox("Proyecto ID", df_proyectos['id_doc'].tolist(), key="asig_p")
-            eval_email = st.text_input("Email del Evaluador")
+            
+            # Obtener lista de evaluadores registrados para autocompletar
+            df_users = obtener_usuarios()
+            evaluadores_list = []
+            if not df_users.empty and "rol" in df_users.columns:
+                evaluadores_list = df_users[df_users["rol"] == "evaluador"]["email"].tolist()
+            
+            if evaluadores_list:
+                eval_email = st.selectbox("Seleccionar Evaluador Registrado", evaluadores_list)
+            else:
+                eval_email = st.text_input("Email del Evaluador (Manual)")
             
             if st.button("Guardar Asignación"):
                 asignar_evaluador(proj_id_asig, eval_email)
@@ -255,6 +281,38 @@ if rol in ["admin", "referente"]:
                 file_name=f"Reporte_Feria_{rol}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+    # --- TAB EXCLUSIVA ADMIN: REGISTRO DE USUARIOS ---
+    if rol == "admin":
+        with tabs[5]:
+            st.subheader("Alta de Evaluadores y Referentes")
+            
+            col_u1, col_u2 = st.columns(2)
+            with col_u1:
+                st.markdown("##### ➕ Registrar Nuevo Usuario")
+                nuevo_email = st.text_input("Correo electrónico del usuario")
+                nuevo_pass = st.text_input("Contraseña temporal", type="password")
+                nuevo_rol = st.selectbox("Rol asignado", ["evaluador", "referente", "admin"])
+                
+                if st.button("Crear Usuario", type="primary"):
+                    if nuevo_email and nuevo_pass:
+                        exito, mensaje = registrar_usuario(nuevo_email, nuevo_pass, nuevo_rol)
+                        if exito:
+                            st.success(mensaje)
+                            st.rerun()
+                        else:
+                            st.error(mensaje)
+                    else:
+                        st.warning("Por favor complete todos los campos.")
+                        
+            with col_u2:
+                st.markdown("##### 📋 Usuarios Registrados en el Sistema")
+                df_usuarios = obtener_usuarios()
+                if not df_usuarios.empty:
+                    cols_usr = [c for c in ["email", "rol"] if c in df_usuarios.columns]
+                    st.dataframe(df_usuarios[cols_usr], use_container_width=True)
+                else:
+                    st.info("No hay usuarios registrados aún.")
 
 # --- VISTA: EVALUADOR ---
 elif rol == "evaluador":
