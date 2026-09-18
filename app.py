@@ -58,7 +58,7 @@ def limpiar_clave_firestore(texto):
     return clean.strip()[:150]
 
 # ---------------------------------------------------------
-# 2. FUNCIONES DE CONSULTA
+# 2. FUNCIONES DE CONSULTA (PROTEGIDAS)
 # ---------------------------------------------------------
 @st.cache_data(ttl=120)
 def obtener_proyectos_cached():
@@ -80,7 +80,22 @@ def obtener_proyectos_cached():
 @st.cache_data(ttl=120)
 def obtener_usuarios_cached():
     docs = db.collection("Usuarios").stream()
-    return pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
+    data = [doc.to_dict() | {"id_doc": doc.id} for doc in docs]
+    df = pd.DataFrame(data)
+    
+    # Blindaje contra campos faltantes en registros de usuarios
+    if not df.empty:
+        if "estado_cuenta" not in df.columns:
+            df["estado_cuenta"] = "Activo"
+        else:
+            df["estado_cuenta"] = df["estado_cuenta"].fillna("Activo")
+            
+        if "rol" not in df.columns:
+            df["rol"] = "evaluador"
+            
+        if "nombre_completo" not in df.columns:
+            df["nombre_completo"] = df["email"]
+    return df
 
 @st.cache_data(ttl=60)
 def obtener_asistencias_cached():
@@ -165,7 +180,7 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
     if df_p.empty or df_u.empty:
         return 0, "No hay proyectos o evaluadores cargados."
         
-    evaluadores = df_u[(df_u["rol"] == "evaluador") & (df_u.get("estado_cuenta", "Activo") == "Activo")].to_dict('records')
+    evaluadores = df_u[(df_u["rol"] == "evaluador") & (df_u["estado_cuenta"] == "Activo")].to_dict('records')
     eval_filtrados = [
         e for e in evaluadores 
         if e.get("nivel_especialidad") == filtro_nivel 
@@ -410,7 +425,7 @@ if rol in ["admin", "referente"]:
         else:
             st.info("No hay proyectos cargados.")
 
-    # --- TAB ASISTENCIA (BUSCADOR AVANZADO POR ID, NOMBRE Y DNI) ---
+    # --- TAB ASISTENCIA ---
     idx_asist = 2 if rol == "admin" else 1
     with tabs[idx_asist]:
         st.subheader("Registro de Asistencia a Capacitaciones")
@@ -418,7 +433,6 @@ if rol in ["admin", "referente"]:
         if not df_proyectos.empty:
             st.markdown("##### 🔍 Búsqueda Avanzada de Proyectos / Docentes")
             
-            # Generar opciones combinadas para el buscador: ID + Título + DNI Docente
             opciones_busqueda = []
             mapa_proyectos = {}
             
@@ -453,7 +467,7 @@ if rol in ["admin", "referente"]:
                 
                 if st.button("Guardar Asistencia", type="primary"):
                     guardar_asistencia(proyecto_sel.get('id_doc'), docente_asistente, cap_nom, pres)
-                    st.toast(f"✅ Asistencia registrada", icon="💾")
+                    st.toast("✅ Asistencia registrada", icon="💾")
                     st.success("Guardado con éxito en Firebase.")
 
             with col_cond:
@@ -505,7 +519,7 @@ if rol in ["admin", "referente"]:
             
             with col_m2:
                 df_users = obtener_usuarios_cached()
-                evaluadores_list = df_users[(df_users["rol"] == "evaluador") & (df_users.get("estado_cuenta", "Activo") == "Activo")]["email"].tolist() if not df_users.empty else []
+                evaluadores_list = df_users[(df_users["rol"] == "evaluador") & (df_users["estado_cuenta"] == "Activo")]["email"].tolist() if not df_users.empty else []
                 evals_actuales = normalizar_lista(p_selected.get('evaluadores_asignados'))
 
                 evals_seleccionados = st.multiselect(
@@ -583,14 +597,12 @@ if rol in ["admin", "referente"]:
                         st.write(f"**Estado:** `{eval_data.get('estado_cuenta', 'Activo')}`")
                     with col_info2:
                         st.write(f"**Especialidad:** {eval_data.get('nivel_especialidad', 'N/A')}")
-                        st.write(f"**Días Disponibles:** {', '.join(eval_data.get('dias_disponibles', []))}")
+                        st.write(f"**Días Disponibles:** {', '.join(eval_data.get('dias_disponibles', [])) if isinstance(eval_data.get('dias_disponibles'), list) else ''}")
                     with col_info3:
-                        # Calcular proyectos evaluados en la edición actual
                         cant_evals_2026 = len(df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)]) if not df_proyectos.empty else 0
                         st.metric("Proyectos Asignados (2026)", cant_evals_2026)
 
                     st.markdown("#### 📜 Historial Interanual de Proyectos Evaluados")
-                    # Proyectos asignados este año
                     proys_evaluador = df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)] if not df_proyectos.empty else pd.DataFrame()
                     if not proys_evaluador.empty:
                         cols_m = [c for c in ["id_doc", "titulo", "nivel_agrupado", "escuela_estandarizada", "estado_evaluacion", "anio_edicion"] if c in proys_evaluador.columns]
@@ -624,7 +636,7 @@ if rol in ["admin", "referente"]:
             df_u = obtener_usuarios_cached()
             
             if not df_u.empty:
-                pendientes = df_u[df_u.get("estado_cuenta", "Activo") == "Pendiente"]
+                pendientes = df_u[df_u["estado_cuenta"] == "Pendiente"]
                 
                 st.markdown("##### ⏳ Solicitudes Pendientes de Aprobación")
                 if not pendientes.empty:
