@@ -58,7 +58,7 @@ def limpiar_clave_firestore(texto):
     return clean.strip()[:150]
 
 # ---------------------------------------------------------
-# 2. FUNCIONES DE CONSULTA (PROTEGIDAS Y POR AÑO)
+# 2. FUNCIONES DE CONSULTA
 # ---------------------------------------------------------
 @st.cache_data(ttl=120)
 def obtener_proyectos_cached():
@@ -151,7 +151,7 @@ def agregar_comentario_evaluador(doc_id, comentario_texto, autor, anio_edicion):
     
     comentarios.append({
         "fecha": pd.Timestamp.now().strftime("%Y-%m-%d"),
-        "anio_edicion": anio_edicion,
+        "anio_edicion": str(anio_edicion).strip(),
         "autor": autor,
         "texto": comentario_texto
     })
@@ -164,7 +164,7 @@ def guardar_asistencia(proyecto_id, docente, capacitacion, presente, anio_edicio
         "docente": docente,
         "capacitacion": capacitacion,
         "presente": presente,
-        "anio_edicion": anio_edicion,
+        "anio_edicion": str(anio_edicion).strip(),
         "fecha": firestore.SERVER_TIMESTAMP
     })
     st.cache_data.clear()
@@ -193,7 +193,7 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia, anio_edicion):
     if len(eval_filtrados) < tamano_grupo:
         return 0, f"Insuficientes evaluadores habilitados ({len(eval_filtrados)}) para formar {tamano_grupo}s."
     
-    df_target = df_p[(df_p["nivel_agrupado"] == filtro_nivel) & (df_p["anio_edicion"] == anio_edicion)]
+    df_target = df_p[(df_p["nivel_agrupado"] == filtro_nivel) & (df_p["anio_edicion"] == str(anio_edicion).strip())]
     proyectos_target = df_target.to_dict('records')
     asig_count = 0
     batch = db.batch()
@@ -220,6 +220,7 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia, anio_edicion):
 def procesar_e_ingresar_csv(df, anio_edicion):
     batch = db.batch()
     contador = 0
+    clean_anio = str(anio_edicion).strip()
     
     def col_search(keywords):
         for c in df.columns:
@@ -240,7 +241,7 @@ def procesar_e_ingresar_csv(df, anio_edicion):
     c_youtube = col_search(['link de video de youtube', 'youtube'])
 
     for idx, row in df.iterrows():
-        doc_id = f"PROY-{anio_edicion}-{idx+1:03d}"
+        doc_id = f"PROY-{clean_anio}-{idx+1:03d}"
         doc_ref = db.collection("proyectos").document(doc_id)
         
         escuela_raw = row.get(c_escuela, "") if c_escuela else ""
@@ -266,7 +267,7 @@ def procesar_e_ingresar_csv(df, anio_edicion):
             "estado_evaluacion": "Pendiente",
             "devolucion": "",
             "dia_evaluacion": "",
-            "anio_edicion": str(anio_edicion),
+            "anio_edicion": clean_anio,
             "formulario_respuestas_completas": datos_completos_excel
         }
         
@@ -340,9 +341,10 @@ user_email = st.session_state["user_email"]
 st.sidebar.write(f"Usuario: **{user_email}**")
 st.sidebar.write(f"Rol: **{rol.upper()}**")
 
-# Selector de Año / Edición
+# Campo de texto para escribir el año libremente
 st.sidebar.divider()
-anio_edicion_actual = st.sidebar.selectbox("🗓️ Edición / Año Lectivo", ["2026", "2025", "2024", "2027"], index=0)
+anio_input_raw = st.sidebar.text_input("🗓️ Escribir Año / Edición", value="2026")
+anio_edicion_actual = str(anio_input_raw).strip() if anio_input_raw.strip() else "2026"
 
 if st.sidebar.button("Cerrar Sesión"):
     st.session_state["logged_in"] = False
@@ -353,7 +355,6 @@ if rol in ["admin", "referente"]:
     st.title(f"📊 Feria de Ciencias ({anio_edicion_actual}) - Panel {rol.capitalize()}")
     df_all_proyectos = obtener_proyectos_cached()
     
-    # Filtrar proyectos según el año seleccionado
     df_proyectos = df_all_proyectos[df_all_proyectos["anio_edicion"] == anio_edicion_actual] if not df_all_proyectos.empty else pd.DataFrame()
 
     tabs_list = ["📌 Fichas de Proyectos", "🎟️ Asistencia y Certificados", "👥 Asignación y Duplas", "📊 Reportes Personalizados"]
@@ -678,7 +679,6 @@ elif rol == "evaluador":
     st.title(f"📝 Portal de Evaluación Pedagógica ({anio_edicion_actual})")
     proyectos = obtener_proyectos_evaluador(user_email)
     
-    # Filtrar solo proyectos del año activo
     proyectos_anio = [p for p in proyectos if p.get("anio_edicion", "2026") == anio_edicion_actual]
     
     if proyectos_anio:
