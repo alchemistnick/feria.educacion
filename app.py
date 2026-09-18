@@ -96,6 +96,9 @@ def obtener_usuarios_cached():
             
         if "nombre_completo" not in df.columns:
             df["nombre_completo"] = df["email"]
+            
+        if "cv_url" not in df.columns:
+            df["cv_url"] = ""
     return df
 
 @st.cache_data(ttl=60)
@@ -128,6 +131,7 @@ def autorregistro_usuario(email, password, nombre):
         "estado_cuenta": "Pendiente",
         "nivel_especialidad": "Sin Definir",
         "dias_disponibles": [],
+        "cv_url": "",
         "comentarios_interanuales": []
     })
     st.cache_data.clear()
@@ -139,6 +143,18 @@ def aprobar_usuario(doc_id, rol, nivel_especialidad, dias_disponibles):
         "estado_cuenta": "Activo",
         "nivel_especialidad": nivel_especialidad,
         "dias_disponibles": dias_disponibles
+    })
+    st.cache_data.clear()
+
+def actualizar_dias_evaluador(doc_id, nuevos_dias):
+    db.collection("Usuarios").document(doc_id).update({
+        "dias_disponibles": nuevos_dias
+    })
+    st.cache_data.clear()
+
+def guardar_cv_evaluador(doc_id, cv_link):
+    db.collection("Usuarios").document(doc_id).update({
+        "cv_url": cv_link
     })
     st.cache_data.clear()
 
@@ -341,9 +357,10 @@ if not st.session_state["logged_in"]:
 # ---------------------------------------------------------
 rol = st.session_state["user_role"]
 user_email = st.session_state["user_email"]
+user_doc_id = st.session_state.get("user_doc_id", "")
 
 st.sidebar.write(f"Usuario: **{user_email}**")
-st.sidebar.write(f"Rol: **{rol.upper()}**")
+st.sidebar.write(f"Rol Actual: **{rol.upper()}**")
 
 st.sidebar.divider()
 anio_input_raw = st.sidebar.text_input("🗓️ Escribir Año / Edición", value="2026")
@@ -353,24 +370,37 @@ if st.sidebar.button("Cerrar Sesión"):
     st.session_state["logged_in"] = False
     st.rerun()
 
-# --- VISTA: ADMIN & REFERENTE ---
+# --- VISTAS SEGÚN PERFIL Y ROL ---
+
+# 1. PERFIL: ADMIN Y REFERENTE
 if rol in ["admin", "referente"]:
     st.title(f"📊 Feria de Ciencias ({anio_edicion_actual}) - Panel {rol.capitalize()}")
     df_all_proyectos = obtener_proyectos_cached()
-    
     df_proyectos = df_all_proyectos[df_all_proyectos["anio_edicion"] == anio_edicion_actual] if not df_all_proyectos.empty else pd.DataFrame()
 
-    tabs_list = ["📌 Fichas de Proyectos", "🎟️ Asistencia y Certificados", "👥 Asignación y Duplas", "📊 Reportes Personalizados"]
     if rol == "admin":
-        tabs_list.insert(0, "📤 Cargar CSV Forms")
-        tabs_list.append("🏅 Ficha Evaluadores & Historial")
-        tabs_list.append("👤 Solicitudes & Usuarios")
+        tabs_list = [
+            "📤 Cargar CSV Forms", 
+            "📌 Fichas de Proyectos", 
+            "🎟️ Asistencia y Certificados", 
+            "👥 Asignación y Duplas", 
+            "📊 Reportes Personalizados",
+            "🏅 Ficha Evaluadores & Historial",
+            "👤 Solicitudes & Usuarios"
+        ]
+    else:
+        tabs_list = [
+            "📌 Fichas de Proyectos", 
+            "🎟️ Asistencia y Certificados", 
+            "📊 Reportes Personalizados"
+        ]
         
     tabs = st.tabs(tabs_list)
+    tab_idx = 0
 
-    # --- TAB ADMIN: CARGA DE CSV ---
+    # --- TAB EXCLUSIVA ADMIN: CARGA CSV ---
     if rol == "admin":
-        with tabs[0]:
+        with tabs[tab_idx]:
             st.subheader(f"Carga Masiva de Respuestas de Forms - Edición {anio_edicion_actual}")
             archivo_subido = st.file_uploader("Seleccionar archivo CSV o Excel", type=["csv", "xlsx"])
             if archivo_subido is not None:
@@ -385,10 +415,10 @@ if rol in ["admin", "referente"]:
                             st.rerun()
                 except Exception as e:
                     st.error(f"Error al procesar el archivo: {e}")
+        tab_idx += 1
 
-    # --- TAB FICHAS DE PROYECTOS ---
-    idx_proj = 1 if rol == "admin" else 0
-    with tabs[idx_proj]:
+    # --- TAB FICHAS DE PROYECTOS (ADMIN Y REFERENTE) ---
+    with tabs[tab_idx]:
         st.subheader(f"Fichas de Proyectos ({anio_edicion_actual})")
         if not df_proyectos.empty:
             col_f1, col_f2, col_f3 = st.columns(3)
@@ -440,15 +470,13 @@ if rol in ["admin", "referente"]:
                         st.success(p.get('devolucion'))
         else:
             st.info(f"No hay proyectos cargados para la edición {anio_edicion_actual}.")
+    tab_idx += 1
 
-    # --- TAB ASISTENCIA ---
-    idx_asist = 2 if rol == "admin" else 1
-    with tabs[idx_asist]:
+    # --- TAB ASISTENCIA (ADMIN Y REFERENTE) ---
+    with tabs[tab_idx]:
         st.subheader(f"Registro de Asistencia y Acreditación de Puntaje ({anio_edicion_actual})")
-        
         if not df_proyectos.empty:
             st.markdown("##### 🔍 Búsqueda Avanzada de Proyectos / Docentes")
-            
             opciones_busqueda = []
             mapa_proyectos = {}
             
@@ -466,7 +494,6 @@ if rol in ["admin", "referente"]:
                 f"Buscar Proyecto ({anio_edicion_actual}) por Nombre, ID o DNI de Docente:",
                 options=opciones_busqueda
             )
-            
             proyecto_sel = mapa_proyectos[seleccion_label]
             
             st.divider()
@@ -494,7 +521,6 @@ if rol in ["admin", "referente"]:
 
             with col_cond:
                 st.markdown("##### 📜 Parámetros Configurables para Acreditación de Puntaje")
-                
                 c_req1, c_req2 = st.columns(2)
                 with c_req1:
                     req_capacitaciones = st.number_input("Capacitaciones obligatorias", min_value=0, max_value=5, value=2)
@@ -516,7 +542,6 @@ if rol in ["admin", "referente"]:
             df_asist_all = obtener_asistencias_cached()
             if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
                 asist_validas = df_asist_all[df_asist_all["presente"] == True]
-                
                 resumen_cert = []
                 for _, p_row in df_proyectos.iterrows():
                     p_id = p_row.get("id_doc")
@@ -527,7 +552,6 @@ if rol in ["admin", "referente"]:
                     
                     cumple_caps = caps_asistidas >= req_capacitaciones
                     cumple_feria = feria_asistida >= req_instancias_feria
-                    
                     otorgar_puntaje = "SÍ" if (cumple_caps and cumple_feria) else "NO"
                     
                     docente_display = str(p_row.get("docente_cargo", "")).strip()
@@ -559,67 +583,66 @@ if rol in ["admin", "referente"]:
                     file_name=f"Reporte_Certificacion_Puntaje_{anio_edicion_actual}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+    tab_idx += 1
 
-    # --- TAB ASIGNACIÓN DE EVALUADORES Y DUPLAS ---
-    idx_eval = 3 if rol == "admin" else 2
-    with tabs[idx_eval]:
-        st.subheader(f"Asignación de Evaluadores ({anio_edicion_actual})")
-        
-        st.markdown("#### ⚡ Asignación Automática")
-        col_a1, col_a2, col_a3, col_a4 = st.columns(4)
-        with col_a1:
-            modo_grupo = st.radio("Formato", ["Duplas (2)", "Triejas (3)"])
-            tamano = 2 if "Duplas" in modo_grupo else 3
-        with col_a2:
-            auto_nivel = st.selectbox("Nivel", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"])
-        with col_a3:
-            auto_dia = st.selectbox("Día", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"])
-        with col_a4:
-            st.write("")
-            st.write("")
-            if st.button("Generar y Asignar", type="primary"):
-                cant, msg = asignacion_automatica(tamano, auto_nivel, auto_dia, anio_edicion_actual)
-                if cant > 0:
-                    st.toast("✅ Asignación automática completada", icon="🎯")
+    # --- TAB EXCLUSIVA ADMIN: ASIGNACIÓN DE EVALUADORES ---
+    if rol == "admin":
+        with tabs[tab_idx]:
+            st.subheader(f"Asignación de Evaluadores ({anio_edicion_actual})")
+            st.markdown("#### ⚡ Asignación Automática")
+            col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+            with col_a1:
+                modo_grupo = st.radio("Formato", ["Duplas (2)", "Triejas (3)"])
+                tamano = 2 if "Duplas" in modo_grupo else 3
+            with col_a2:
+                auto_nivel = st.selectbox("Nivel", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"])
+            with col_a3:
+                auto_dia = st.selectbox("Día", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"])
+            with col_a4:
+                st.write("")
+                st.write("")
+                if st.button("Generar y Asignar", type="primary"):
+                    cant, msg = asignacion_automatica(tamano, auto_nivel, auto_dia, anio_edicion_actual)
+                    if cant > 0:
+                        st.toast("✅ Asignación automática completada", icon="🎯")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            st.divider()
+            st.markdown("#### 🛠️ Asignación / Ajuste Manual")
+            if not df_proyectos.empty:
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    proj_id_asig = st.selectbox("Seleccionar Proyecto", df_proyectos['id_doc'].tolist(), key="asig_manual")
+                    p_selected = df_proyectos[df_proyectos['id_doc'] == proj_id_asig].iloc[0]
+                    st.caption(f"Nivel: **{p_selected.get('nivel_agrupado')}** | Escuela: **{p_selected.get('escuela_estandarizada')}**")
+                
+                with col_m2:
+                    df_users = obtener_usuarios_cached()
+                    evaluadores_list = df_users[(df_users["rol"] == "evaluador") & (df_users["estado_cuenta"] == "Activo")]["email"].tolist() if not df_users.empty else []
+                    evals_actuales = normalizar_lista(p_selected.get('evaluadores_asignados'))
+
+                    evals_seleccionados = st.multiselect(
+                        "Evaluadores Asignados", 
+                        options=evaluadores_list, 
+                        default=[e for e in evals_actuales if e in evaluadores_list]
+                    )
+
+                if st.button("Guardar Asignación Manual"):
+                    asignar_evaluadores_manual(proj_id_asig, evals_seleccionados)
+                    st.toast("✅ Asignación guardada", icon="💾")
                     st.rerun()
-                else:
-                    st.error(msg)
+        tab_idx += 1
 
-        st.divider()
-        st.markdown("#### 🛠️ Asignación / Ajuste Manual")
-        if not df_proyectos.empty:
-            col_m1, col_m2 = st.columns(2)
-            with col_m1:
-                proj_id_asig = st.selectbox("Seleccionar Proyecto", df_proyectos['id_doc'].tolist(), key="asig_manual")
-                p_selected = df_proyectos[df_proyectos['id_doc'] == proj_id_asig].iloc[0]
-                st.caption(f"Nivel: **{p_selected.get('nivel_agrupado')}** | Escuela: **{p_selected.get('escuela_estandarizada')}**")
-            
-            with col_m2:
-                df_users = obtener_usuarios_cached()
-                evaluadores_list = df_users[(df_users["rol"] == "evaluador") & (df_users["estado_cuenta"] == "Activo")]["email"].tolist() if not df_users.empty else []
-                evals_actuales = normalizar_lista(p_selected.get('evaluadores_asignados'))
-
-                evals_seleccionados = st.multiselect(
-                    "Evaluadores Asignados", 
-                    options=evaluadores_list, 
-                    default=[e for e in evals_actuales if e in evaluadores_list]
-                )
-
-            if st.button("Guardar Asignación Manual"):
-                asignar_evaluadores_manual(proj_id_asig, evals_seleccionados)
-                st.toast("✅ Asignación guardada", icon="💾")
-                st.rerun()
-
-    # --- TAB REPORTES PERSONALIZADOS ---
-    idx_rep = 4 if rol == "admin" else 3
-    with tabs[idx_rep]:
+    # --- TAB REPORTES PERSONALIZADOS CON FILTROS DE EVENTO/CAPACITACIÓN ---
+    with tabs[tab_idx]:
         st.subheader(f"Reportes Excel - Edición {anio_edicion_actual}")
-        
         tipo_reporte = st.selectbox("Tipo de Reporte", [
             "Reporte Consolidado General",
             "Reporte por Nivel Educativo (Inicial / Primaria / Secundaria)",
             "Reporte de Asignación de Evaluadores y Duplas",
-            "Reporte de Asistencia a Capacitaciones"
+            "Reporte de Asistencia a Capacitación o Día Específico"
         ])
         
         if not df_proyectos.empty:
@@ -639,10 +662,16 @@ if rol in ["admin", "referente"]:
                     cols_eval = ["id_doc", "titulo", "nivel_agrupado", "escuela_estandarizada", "evaluadores_asignados", "dia_evaluacion", "estado_evaluacion"]
                     cols_exist = [c for c in cols_eval if c in df_rep.columns]
                     df_rep[cols_exist].to_excel(writer, sheet_name='Asignaciones', index=False)
-                elif tipo_reporte == "Reporte de Asistencia a Capacitaciones":
+                elif tipo_reporte == "Reporte de Asistencia a Capacitación o Día Específico":
                     df_asist = obtener_asistencias_cached()
                     if not df_asist.empty:
-                        df_asist.to_excel(writer, sheet_name='Asistencias', index=False)
+                        eventos_disponibles = ["TODOS LOS EVENTOS"] + df_asist["capacitacion"].unique().tolist()
+                        evento_filtro = st.selectbox("Filtrar por Capacitación o Día de Feria:", eventos_disponibles)
+                        
+                        if evento_filtro != "TODOS LOS EVENTOS":
+                            df_asist = df_asist[df_asist["capacitacion"] == evento_filtro]
+                        
+                        df_asist.to_excel(writer, sheet_name='Asistencias_Filtradas', index=False)
 
             st.download_button(
                 label=f"📥 Descargar {tipo_reporte} ({anio_edicion_actual}).xlsx",
@@ -650,18 +679,18 @@ if rol in ["admin", "referente"]:
                 file_name=f"{tipo_reporte.replace(' ', '_')}_{anio_edicion_actual}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+    tab_idx += 1
 
-    # --- TAB ADMIN EXCLUSIVA: FICHA DE DESEMPEÑO DE EVALUADORES ---
+    # --- TAB EXCLUSIVA ADMIN: FICHA DE EVALUADORES Y EDICIÓN DE DÍAS ---
     if rol == "admin":
-        with tabs[5]:
-            st.subheader("🏅 Ficha de Desempeño e Historial de Evaluadores")
+        with tabs[tab_idx]:
+            st.subheader("🏅 Ficha de Desempeño, Días y CV de Evaluadores")
             df_u = obtener_usuarios_cached()
             
             if not df_u.empty:
                 df_evals = df_u[df_u["rol"] == "evaluador"]
                 if not df_evals.empty:
                     eval_sel_email = st.selectbox("Seleccionar Evaluador para ver Ficha:", df_evals["email"].tolist())
-                    
                     eval_data = df_evals[df_evals["email"] == eval_sel_email].iloc[0]
                     eval_id = eval_data["id_doc"]
                     
@@ -672,12 +701,33 @@ if rol in ["admin", "referente"]:
                     with col_info1:
                         st.write(f"**Email:** {eval_sel_email}")
                         st.write(f"**Estado:** `{eval_data.get('estado_cuenta', 'Activo')}`")
+                        if eval_data.get('cv_url'):
+                            st.markdown(f"📄 [Abrir CV del Evaluador]({eval_data.get('cv_url')})")
+                        else:
+                            st.info("Sin CV adjunto.")
                     with col_info2:
                         st.write(f"**Especialidad:** {eval_data.get('nivel_especialidad', 'N/A')}")
-                        st.write(f"**Días Disponibles:** {', '.join(eval_data.get('dias_disponibles', [])) if isinstance(eval_data.get('dias_disponibles'), list) else ''}")
+                        dias_actuales = eval_data.get('dias_disponibles', [])
+                        if not isinstance(dias_actuales, list):
+                            dias_actuales = []
+                        st.write(f"**Días Actuales:** {', '.join(dias_actuales)}")
                     with col_info3:
                         cant_evals_actual = len(df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)]) if not df_proyectos.empty else 0
                         st.metric(f"Proyectos Asignados ({anio_edicion_actual})", cant_evals_actual)
+
+                    # Edición manual de días desde la ficha
+                    st.markdown("#### ✏️ Modificar Días Disponibles del Evaluador")
+                    dias_editados = st.multiselect(
+                        "Seleccionar días de disponibilidad:",
+                        options=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"],
+                        default=[d for d in dias_actuales if d in ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]],
+                        key=f"edit_dias_{eval_id}"
+                    )
+                    
+                    if st.button("Actualizar Días en Ficha", key=f"btn_save_dias_{eval_id}"):
+                        actualizar_dias_evaluador(eval_id, dias_editados)
+                        st.toast("✅ Días actualizados en legajo", icon="📅")
+                        st.rerun()
 
                     st.markdown("#### 📜 Historial Interanual de Proyectos Evaluados")
                     proys_evaluador = df_all_proyectos[df_all_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)] if not df_all_proyectos.empty else pd.DataFrame()
@@ -689,7 +739,6 @@ if rol in ["admin", "referente"]:
 
                     st.divider()
                     st.markdown("#### 💬 Bitácora / Comentarios de Desempeño Interanual")
-                    
                     comentarios = eval_data.get("comentarios_interanuales", [])
                     if isinstance(comentarios, list) and comentarios:
                         for c in comentarios:
@@ -700,21 +749,20 @@ if rol in ["admin", "referente"]:
                     with st.form(key=f"form_comentario_{eval_id}"):
                         nuevo_comentario = st.text_area(f"Agregar observación sobre el desempeño para la edición {anio_edicion_actual}:")
                         submit_com = st.form_submit_button("Guardar Comentario en Ficha")
-                        
                         if submit_com and nuevo_comentario:
                             agregar_comentario_evaluador(eval_id, nuevo_comentario, user_email, anio_edicion_actual)
                             st.toast("✅ Comentario guardado en legajo", icon="📝")
                             st.rerun()
+        tab_idx += 1
 
-    # --- TAB ADMIN EXCLUSIVA: HABILITACIÓN DE REGISTROS ---
+    # --- TAB EXCLUSIVA ADMIN: SOLICITUDES Y REGISTRO DE USUARIOS ---
     if rol == "admin":
-        with tabs[6]:
+        with tabs[tab_idx]:
             st.subheader("👤 Solicitudes de Registro y Control de Usuarios")
             df_u = obtener_usuarios_cached()
             
             if not df_u.empty:
                 pendientes = df_u[df_u["estado_cuenta"] == "Pendiente"]
-                
                 st.markdown("##### ⏳ Solicitudes Pendientes de Aprobación")
                 if not pendientes.empty:
                     for idx, u in pendientes.iterrows():
@@ -739,11 +787,20 @@ if rol in ["admin", "referente"]:
                 cols_u = [c for c in ["id_doc", "email", "nombre_completo", "rol", "estado_cuenta", "nivel_especialidad"] if c in df_u.columns]
                 st.dataframe(df_u[cols_u], use_container_width=True)
 
-# --- VISTA: EVALUADOR ---
+# 2. PERFIL: EVALUADOR
 elif rol == "evaluador":
     st.title(f"📝 Portal de Evaluación Pedagógica ({anio_edicion_actual})")
-    proyectos = obtener_proyectos_evaluador(user_email)
     
+    # Módulo de Carga de CV en el perfil del evaluador
+    with st.sidebar.expander("📄 Mi Curriculum Vitae (CV)"):
+        cv_link_input = st.text_input("Enlace a CV (Google Drive / Dropbox):")
+        if st.button("Guardar Enlace CV"):
+            if cv_link_input and user_doc_id:
+                guardar_cv_evaluador(user_doc_id, cv_link_input)
+                st.toast("✅ Enlace de CV guardado", icon="📄")
+                st.rerun()
+
+    proyectos = obtener_proyectos_evaluador(user_email)
     proyectos_anio = [p for p in proyectos if p.get("anio_edicion", "2026") == anio_edicion_actual]
     
     if proyectos_anio:
