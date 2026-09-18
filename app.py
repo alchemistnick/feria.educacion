@@ -287,7 +287,7 @@ if "logged_in" not in st.session_state:
 
 if not st.session_state["logged_in"]:
     st.sidebar.title("🔬 Portal Feria de Ciencias")
-    modo_acceso = st.sidebar.radio("Acceso", ["Iniciar Sesión", "Registrarse (Nuevo Evaluador)"])
+    modo_acceso = st.sidebar.radio("Acceso", ["Iniciar Sesión", "Registrarse"])
     
     if modo_acceso == "Iniciar Sesión":
         email = st.sidebar.text_input("Correo electrónico")
