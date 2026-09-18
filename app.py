@@ -2,18 +2,18 @@ import streamlit as st
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
-import json
 import io
 
 st.set_page_config(page_title="Feria de Ciencias 2026", page_icon="🔬", layout="wide")
 
 # ---------------------------------------------------------
-# 1. INICIALIZACIÓN DE FIREBASE VIA STREAMLIT SECRETS
+# 1. INICIALIZACIÓN DE FIREBASE (CORREGIDO)
 # ---------------------------------------------------------
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
-        key_dict = json.loads(st.secrets["textkey"])
+        # Convertimos la sección TOML de Streamlit Secrets directamente a diccionario
+        key_dict = dict(st.secrets["textkey"])
         cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
     return firestore.client()
