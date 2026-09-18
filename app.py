@@ -233,9 +233,9 @@ def procesar_e_ingresar_csv(df, anio_edicion):
     c_distrito = col_search(['distrito escolar', 'distrito'])
     c_cue = col_search(['cue'])
     c_nivel = col_search(['nivel educativo', 'nivel'])
-    c_docente = col_search(['docente a cargo del proyecto', 'docente'])
+    c_docente = col_search(['docente a cargo del proyecto', 'docente', 'nombre'])
     c_dni_docente = col_search(['dni - docente', 'dni docente', 'dni'])
-    c_email = col_search(['correo electrónico - docente', 'email'])
+    c_email = col_search(['correo electrónico - docente', 'email', 'correo'])
     c_resumen = col_search(['resumen del proyecto', 'resumen'])
     c_pdf = col_search(['subí el proyecto', 'pdf'])
     c_youtube = col_search(['link de video de youtube', 'youtube'])
@@ -247,6 +247,10 @@ def procesar_e_ingresar_csv(df, anio_edicion):
         escuela_raw = row.get(c_escuela, "") if c_escuela else ""
         nivel_raw = row.get(c_nivel, "") if c_nivel else ""
         
+        docente_nombre_raw = str(row.get(c_docente, "")).strip() if c_docente else ""
+        docente_dni_raw = str(row.get(c_dni_docente, "")).strip() if c_dni_docente else ""
+        docente_email_raw = str(row.get(c_email, "")).strip() if c_email else ""
+
         datos_completos_excel = {limpiar_clave_firestore(col): ("" if pd.isna(row.get(col)) else str(row.get(col)).strip()) for col in df.columns}
 
         doc_data = {
@@ -257,9 +261,9 @@ def procesar_e_ingresar_csv(df, anio_edicion):
             "cue": str(row.get(c_cue, "")) if c_cue else "",
             "nivel_raw": str(nivel_raw),
             "nivel_agrupado": agrupar_nivel(nivel_raw),
-            "docente_cargo": str(row.get(c_docente, "")) if c_docente else "",
-            "docente_dni": str(row.get(c_dni_docente, "")) if c_dni_docente else "",
-            "docente_email": str(row.get(c_email, "")) if c_email else "",
+            "docente_cargo": docente_nombre_raw,
+            "docente_dni": docente_dni_raw,
+            "docente_email": docente_email_raw,
             "resumen": str(row.get(c_resumen, "")) if c_resumen else "",
             "drive_pdf": str(row.get(c_pdf, "")) if c_pdf else "",
             "youtube_url": str(row.get(c_youtube, "")) if c_youtube else "",
@@ -414,7 +418,8 @@ if rol in ["admin", "referente"]:
                     with c1:
                         st.markdown(f"**Escuela:** {p.get('escuela_estandarizada', 'N/A')}")
                         st.markdown(f"**Distrito Escolar:** {p.get('distrito', 'N/A')} | **CUE:** {p.get('cue', 'N/A')}")
-                        st.markdown(f"**Docente a Cargo:** {p.get('docente_cargo', 'N/A')} (DNI: {p.get('docente_dni', 'N/A')})")
+                        docente_txt = p.get('docente_cargo', '') if p.get('docente_cargo') else p.get('docente_email', 'N/A')
+                        st.markdown(f"**Docente a Cargo:** {docente_txt} (DNI: {p.get('docente_dni', 'N/A')})")
                     with c2:
                         st.markdown(f"**Evaluadores Asignados:** {', '.join(evals) if evals else '⚠️ Sin Asignar'}")
                         st.markdown(f"**Estado:** {p.get('estado_evaluacion', 'Pendiente')}")
@@ -436,7 +441,7 @@ if rol in ["admin", "referente"]:
         else:
             st.info(f"No hay proyectos cargados para la edición {anio_edicion_actual}.")
 
-    # --- TAB ASISTENCIA Y REGLAS PARAMETRIZABLES DE CERTIFICACIÓN ---
+    # --- TAB ASISTENCIA ---
     idx_asist = 2 if rol == "admin" else 1
     with tabs[idx_asist]:
         st.subheader(f"Registro de Asistencia y Acreditación de Puntaje ({anio_edicion_actual})")
@@ -450,7 +455,7 @@ if rol in ["admin", "referente"]:
             for idx, p in df_proyectos.iterrows():
                 p_id = str(p.get("id_doc", ""))
                 p_tit = str(p.get("titulo", "Sin Título"))
-                p_doc = str(p.get("docente_cargo", ""))
+                p_doc = str(p.get("docente_cargo", "")) if str(p.get("docente_cargo", "")).strip() else str(p.get("docente_email", ""))
                 p_dni = str(p.get("docente_dni", ""))
                 
                 label = f"{p_id} | {p_tit[:40]}... | Docente: {p_doc} (DNI: {p_dni})"
@@ -469,10 +474,11 @@ if rol in ["admin", "referente"]:
             
             with col_regist:
                 st.markdown("##### 🎟️ Registrar Asistencia Puntual")
+                doc_nombre = proyecto_sel.get('docente_cargo') if proyecto_sel.get('docente_cargo') else proyecto_sel.get('docente_email')
                 st.write(f"**Proyecto:** `{proyecto_sel.get('id_doc')}` - {proyecto_sel.get('titulo')}")
-                st.write(f"**Docente Inscrito:** {proyecto_sel.get('docente_cargo')} (DNI: {proyecto_sel.get('docente_dni')})")
+                st.write(f"**Docente Inscrito:** {doc_nombre} (DNI: {proyecto_sel.get('docente_dni')})")
                 
-                docente_asistente = st.text_input("Nombre / DNI del Docente Asistente", value=f"{proyecto_sel.get('docente_cargo')} - {proyecto_sel.get('docente_dni')}")
+                docente_asistente = st.text_input("Nombre / DNI del Docente Asistente", value=f"{doc_nombre} - DNI: {proyecto_sel.get('docente_dni')}")
                 cap_nom = st.selectbox("Instancia de Evaluación / Asistencia", [
                     "Capacitación 1 - General", 
                     "Capacitación 2 - Metodología", 
@@ -495,8 +501,6 @@ if rol in ["admin", "referente"]:
                 with c_req2:
                     req_instancias_feria = st.number_input("Instancias de Feria requeridas", min_value=0, max_value=5, value=1)
                     
-                es_docente_unico_estricto = st.checkbox("Exigir 100% de asistencia si el proyecto tiene un Único Docente", value=True)
-                
                 df_asist_all = obtener_asistencias_cached()
                 if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
                     st.markdown(f"**Historial del Proyecto `{proyecto_sel.get('id_doc')}`:**")
@@ -513,7 +517,6 @@ if rol in ["admin", "referente"]:
             if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
                 asist_validas = df_asist_all[df_asist_all["presente"] == True]
                 
-                # Agrupación de métricas de acreditación
                 resumen_cert = []
                 for _, p_row in df_proyectos.iterrows():
                     p_id = p_row.get("id_doc")
@@ -527,11 +530,17 @@ if rol in ["admin", "referente"]:
                     
                     otorgar_puntaje = "SÍ" if (cumple_caps and cumple_feria) else "NO"
                     
+                    docente_display = str(p_row.get("docente_cargo", "")).strip()
+                    if not docente_display:
+                        docente_display = str(p_row.get("docente_email", "")).strip()
+                    if p_row.get("docente_dni"):
+                        docente_display += f" (DNI: {p_row.get('docente_dni')})"
+                    
                     resumen_cert.append({
                         "ID Proyecto": p_id,
                         "Título": p_row.get("titulo"),
                         "Escuela": p_row.get("escuela_estandarizada"),
-                        "Docente": p_row.get("docente_cargo"),
+                        "Docente": docente_display,
                         "Capacitaciones": f"{caps_asistidas}/{req_capacitaciones}",
                         "Instancias Feria": f"{feria_asistida}/{req_instancias_feria}",
                         "Acredita Puntaje": otorgar_puntaje
@@ -540,7 +549,6 @@ if rol in ["admin", "referente"]:
                 df_resumen_cert = pd.DataFrame(resumen_cert)
                 st.dataframe(df_resumen_cert, use_container_width=True)
                 
-                # Descargar reporte especializado de acreditación
                 output_cert = io.BytesIO()
                 with pd.ExcelWriter(output_cert, engine='xlsxwriter') as writer_c:
                     df_resumen_cert.to_excel(writer_c, sheet_name='Certificacion_Puntaje', index=False)
