@@ -5,7 +5,7 @@ from firebase_admin import credentials, firestore
 import re
 import io
 
-st.set_page_config(page_title="Feria de Ciencias", page_icon="🔬", layout="wide")
+st.set_page_config(page_title="Feria Educación, Arte, Ciencia y Tecnología", page_icon="🔬", layout="wide")
 
 # ---------------------------------------------------------
 # 1. INICIALIZACIÓN Y CACHÉ OPTIMIZADO
@@ -543,11 +543,18 @@ if rol in ["admin", "referente"]:
             with col_cond:
                 st.markdown("##### 📜 Parámetros Configurables para Acreditación de Puntaje")
                 c_req1, c_req2 = st.columns(2)
+                
+                # Bloqueo de edición si no es Administrador
+                es_disabled_ref = (rol != "admin")
+                
                 with c_req1:
-                    req_capacitaciones = st.number_input("Capacitaciones obligatorias", min_value=0, max_value=5, value=2)
+                    req_capacitaciones = st.number_input("Capacitaciones obligatorias", min_value=0, max_value=5, value=2, disabled=es_disabled_ref)
                 with c_req2:
-                    req_instancias_feria = st.number_input("Instancias de Feria requeridas", min_value=0, max_value=5, value=1)
+                    req_instancias_feria = st.number_input("Instancias de Feria requeridas", min_value=0, max_value=5, value=1, disabled=es_disabled_ref)
                     
+                if es_disabled_ref:
+                    st.caption("🔒 *Solo el Administrador puede modificar los parámetros de acreditación.*")
+
                 df_asist_all = obtener_asistencias_cached()
                 if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
                     st.markdown(f"**Historial del Proyecto `{proyecto_sel.get('id_doc')}`:**")
@@ -743,7 +750,6 @@ if rol in ["admin", "referente"]:
                         cant_evals_actual = len(df_proyectos[df_proyectos["evaluadores_asignados"].apply(lambda x: eval_sel_email in x)]) if not df_proyectos.empty else 0
                         st.metric(f"Proyectos Asignados ({anio_edicion_actual})", cant_evals_actual)
 
-                    # Botón de desasignación masiva
                     if cant_evals_actual > 0:
                         if st.button(f"🚫 Desasignar a {eval_sel_email} de TODOS los proyectos de {anio_edicion_actual}"):
                             cant_desasig = desasignar_evaluador_de_proyectos(eval_sel_email, anio_edicion_actual)
