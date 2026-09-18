@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
+import re
 import io
 
 st.set_page_config(page_title="Feria de Ciencias 2026", page_icon="🔬", layout="wide")
@@ -51,9 +52,11 @@ def normalizar_lista(val):
         return [str(val)]
     return []
 
-def limpiar_nombre_campo(texto):
-    """Limpia los nombres de columnas del Excel para usar como claves de Firebase."""
-    return str(texto).strip().replace(".", "_").replace("/", "_").replace("[", "_").replace("]", "_")
+def limpiar_clave_firestore(texto):
+    """Limpia caracteres prohibidos en nombres de claves de Firebase Firestore."""
+    clean = str(texto).replace("\n", " ").replace("\r", " ")
+    clean = re.sub(r'[.~*/\[\]#$]', '_', clean)
+    return clean.strip()[:150]  # Recorta longitud extrema si la columna es muy larga
 
 # ---------------------------------------------------------
 # 2. FUNCIONES DE BASE DE DATOS
@@ -95,8 +98,6 @@ def obtener_usuarios():
 
 def registrar_usuario(email, password, rol, nivel_especialidad, dias_disponibles):
     clean_email = email.strip().lower()
-    
-    # ID de documento sencillo basado en el correo
     doc_id = clean_email.replace("@", "_at_").replace(".", "_")
     doc_ref = db.collection("Usuarios").document(doc_id)
     
@@ -201,13 +202,13 @@ def procesar_e_ingresar_csv(df):
         escuela_raw = row.get(c_escuela, "") if c_escuela else ""
         nivel_raw = row.get(c_nivel, "") if c_nivel else ""
         
-        # 1. Guardar todos los campos del Excel dinámicamente
+        # Limpieza de las 127 columnas para Firebase
         datos_completos_excel = {}
         for col in df.columns:
             val = row.get(col)
-            datos_completos_excel[limpiar_nombre_campo(col)] = "" if pd.isna(val) else str(val).strip()
+            clave_limpia = limpiar_clave_firestore(col)
+            datos_completos_excel[clave_limpia] = "" if pd.isna(val) else str(val).strip()
 
-        # 2. Estructura principal consolidada
         doc_data = {
             "titulo": str(row.get(c_titulo, "")).strip() if c_titulo else "Sin Título",
             "escuela_raw": str(escuela_raw),
@@ -225,7 +226,7 @@ def procesar_e_ingresar_csv(df):
             "estado_evaluacion": "Pendiente",
             "devolucion": "",
             "dia_evaluacion": "",
-            "formulario_respuestas_completas": datos_completos_excel  # Todas las 127 columnas guardadas acá
+            "formulario_respuestas_completas": datos_completos_excel
         }
         
         batch.set(doc_ref, doc_data)
@@ -301,9 +302,9 @@ if rol in ["admin", "referente"]:
                     st.write(f"📁 **Archivo detectado:** `{archivo_subido.name}` con **{len(df_raw)}** filas y **{len(df_raw.columns)}** columnas.")
                     
                     if st.button("🚀 Confirmar e Importar a Firebase", type="primary"):
-                        with st.spinner("Procesando proyectos y guardando todas las columnas en Firebase..."):
+                        with st.spinner("Procesando proyectos y guardando en la colección /proyectos..."):
                             total_cargados = procesar_e_ingresar_csv(df_raw)
-                            st.success(f"Se importaron {total_cargados} proyectos con sus datos completos.")
+                            st.success(f"¡Importación exitosa! Se subieron {total_cargados} proyectos a la colección /proyectos.")
                             st.rerun()
                 except Exception as e:
                     st.error(f"Error al procesar el archivo: {e}")
@@ -359,7 +360,6 @@ if rol in ["admin", "referente"]:
                     if p.get('youtube_url'):
                         r2.markdown(f"🎬 [Ver Video en YouTube]({p.get('youtube_url')})")
                     
-                    # Ver todas las respuestas del formulario
                     if p.get('formulario_respuestas_completas'):
                         with st.popover("📋 Ver todas las respuestas del formulario (127 campos)"):
                             st.json(p.get('formulario_respuestas_completas'))
