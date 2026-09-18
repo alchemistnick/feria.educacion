@@ -3,7 +3,6 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 import io
-import random
 
 st.set_page_config(page_title="Feria de Ciencias 2026", page_icon="🔬", layout="wide")
 
@@ -50,7 +49,20 @@ def agrupar_nivel(nivel_raw):
 # ---------------------------------------------------------
 def obtener_proyectos():
     docs = db.collection("proyectos").stream()
-    return pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
+    df = pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
+    
+    # Garantizar que existan las columnas clave para evitar errores KeyError
+    if not df.empty:
+        if "nivel_agrupado" not in df.columns:
+            if "nivel_raw" in df.columns:
+                df["nivel_agrupado"] = df["nivel_raw"].apply(agrupar_nivel)
+            elif "nivel" in df.columns:
+                df["nivel_agrupado"] = df["nivel"].apply(agrupar_nivel)
+            else:
+                df["nivel_agrupado"] = "Sin Agrupar"
+        if "escuela_estandarizada" not in df.columns:
+            df["escuela_estandarizada"] = "Sin Especificar"
+    return df
 
 def obtener_proyectos_evaluador(email):
     docs = db.collection("proyectos").where("evaluadores_asignados", "array_contains", email).stream()
@@ -91,12 +103,16 @@ def asignar_evaluadores_manual(proyecto_id, lista_evaluadores):
 
 def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
     proyectos_docs = db.collection("proyectos").stream()
-    proyectos = [d.to_dict() | {"id_doc": d.id} for d in proyectos_docs]
+    proyectos = []
+    for d in proyectos_docs:
+        p_dict = d.to_dict() | {"id_doc": d.id}
+        if "nivel_agrupado" not in p_dict:
+            p_dict["nivel_agrupado"] = agrupar_nivel(p_dict.get("nivel_raw", p_dict.get("nivel", "")))
+        proyectos.append(p_dict)
     
     usuarios_docs = db.collection("Usuarios").where("rol", "==", "evaluador").stream()
     evaluadores = [u.to_dict() for u in usuarios_docs]
     
-    # Filtrar evaluadores por nivel y día
     eval_filtrados = [
         e for e in evaluadores 
         if e.get("nivel_especialidad") == filtro_nivel 
@@ -112,7 +128,6 @@ def asignacion_automatica(tamano_grupo, filtro_nivel, filtro_dia):
     batch = db.batch()
     
     for i, p in enumerate(proyectos_target):
-        # Selección circular / aleatoria de evaluadores
         seleccionados = [eval_filtrados[(i*tamano_grupo + j) % len(eval_filtrados)]["email"] for j in range(tamano_grupo)]
         
         doc_ref = db.collection("proyectos").document(p["id_doc"])
@@ -259,7 +274,7 @@ if rol in ["admin", "referente"]:
                 except Exception as e:
                     st.error(f"Error al procesar el archivo: {e}")
 
-    # --- TAB FICHAS DE PROYECTOS (VISTA DE TARJETAS NO TABULAR) ---
+    # --- TAB FICHAS DE PROYECTOS ---
     idx_proj = 1 if rol == "admin" else 0
     with tabs[idx_proj]:
         st.subheader("Fichas de Proyectos Inscritos")
@@ -280,19 +295,18 @@ if rol in ["admin", "referente"]:
             if filtro_escuela != "TODAS":
                 df_cards = df_cards[df_cards['escuela_estandarizada'] == filtro_escuela]
             if busqueda_txt:
-                df_cards = df_cards[df_cards['titulo'].str.contains(busqueda_txt, case=False, na=False) | df_cards['id_doc'].str.contains(busqueda_txt, case=False, na=False)]
+                df_cards = df_cards[df_cards['titulo'].astype(str).str.contains(busqueda_txt, case=False, na=False) | df_cards['id_doc'].astype(str).str.contains(busqueda_txt, case=False, na=False)]
 
             st.write(f"Mostrando **{len(df_cards)}** proyectos")
             st.divider()
 
-            # Renderizado en Fichas
             for idx, p in df_cards.iterrows():
                 with st.expander(f"🏷️ [{p.get('id_doc')}] {p.get('titulo', 'Sin Título')} | Nivel: {p.get('nivel_agrupado', 'N/A')}"):
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"**Escuela:** {p.get('escuela_estandarizada', 'N/A')}")
                         st.markdown(f"**Distrito Escolar:** {p.get('distrito', 'N/A')} | **CUE:** {p.get('cue', 'N/A')}")
-                        st.markdown(f"**Nivel Original:** {p.get('nivel_raw', 'N/A')}")
+                        st.markdown(f"**Nivel Original:** {p.get('nivel_raw', p.get('nivel', 'N/A'))}")
                         st.markdown(f"**Docente a Cargo:** {p.get('docente_cargo', 'N/A')} ({p.get('docente_email', 'N/A')})")
                     with c2:
                         st.markdown(f"**Evaluadores Asignados:** {', '.join(p.get('evaluadores_asignados', [])) if p.get('evaluadores_asignados') else '⚠️ Sin Asignar'}")
@@ -312,11 +326,13 @@ if rol in ["admin", "referente"]:
                     if rol == "admin" and p.get('devolucion'):
                         st.markdown("**Devolución Cualitativa de Evaluación:**")
                         st.success(p.get('devolucion'))
+        else:
+            st.info("No hay proyectos cargados. Podés volver a subir el archivo en la pestaña 'Cargar CSV Forms'.")
 
     # --- TAB ASISTENCIA ---
     idx_asist = 2 if rol == "admin" else 1
     with tabs[idx_asist]:
-        st.subheader("Registro de Asistencia a Capacitaciones por Proyecto y Docente")
+        st.subheader("Registro de Asistencia a Capacitaciones")
         if not df_proyectos.empty:
             proj_id = st.selectbox("Seleccionar Proyecto", df_proyectos['id_doc'].tolist())
             docente_nom = st.text_input("Nombre / DNI del Docente")
@@ -327,10 +343,10 @@ if rol in ["admin", "referente"]:
                 guardar_asistencia(proj_id, docente_nom, cap_nom, pres)
                 st.success("Asistencia registrada en Firebase.")
 
-    # --- TAB ASIGNACIÓN DE EVALUADORES Y DUPLAS/TRIEJAS ---
+    # --- TAB ASIGNACIÓN DE EVALUADORES Y DUPLAS ---
     idx_eval = 3 if rol == "admin" else 2
     with tabs[idx_eval]:
-        st.subheader("Asignación por Nivel, Día y Conformación de Duplas/Trietas")
+        st.subheader("Asignación por Nivel, Día y Duplas/Triejas")
         
         st.markdown("#### ⚡ Asignación Automática")
         col_a1, col_a2, col_a3, col_a4 = st.columns(4)
@@ -379,13 +395,13 @@ if rol in ["admin", "referente"]:
 
             if st.button("Guardar Asignación Manual"):
                 asignar_evaluadores_manual(proj_id_asig, evals_seleccionados)
-                st.success(f"Asignación actualizada para el proyecto {proj_id_asig}.")
+                st.success(f"Asignación actualizada para {proj_id_asig}.")
                 st.rerun()
 
     # --- TAB REPORTES PERSONALIZADOS ---
     idx_rep = 4 if rol == "admin" else 3
     with tabs[idx_rep]:
-        st.subheader("Generación y Descarga de Reportes Especiales")
+        st.subheader("Generación y Descarga de Reportes")
         
         tipo_reporte = st.selectbox("Seleccionar Tipo de Reporte", [
             "Reporte Consolidado General",
@@ -441,7 +457,6 @@ if rol in ["admin", "referente"]:
                 nuevo_pass = st.text_input("Contraseña", type="password")
                 nuevo_rol = st.selectbox("Rol", ["evaluador", "referente", "admin"])
                 
-                # Campos específicos para Evaluadores
                 nivel_esp = st.selectbox("Nivel de Especialidad", ["INICIAL", "PRIMARIA", "SECUNDARIA / SUPERIOR"])
                 dias_disp = st.multiselect("Días Disponibles", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"], default=["Lunes", "Martes"])
                 
@@ -490,7 +505,7 @@ elif rol == "evaluador":
                 
                 devolucion_actual = p.get('devolucion', '')
                 devolucion = st.text_area(
-                    "Registro de observaciones, devoluciones y retroalimentación pedagógica para el proyecto (sin puntaje numérico):", 
+                    "Registro de observaciones y retroalimentación pedagógica para el proyecto (sin puntaje):", 
                     value=str(devolucion_actual), 
                     key=f"d_{p['id_doc']}"
                 )
