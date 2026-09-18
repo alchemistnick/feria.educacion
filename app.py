@@ -341,7 +341,6 @@ user_email = st.session_state["user_email"]
 st.sidebar.write(f"Usuario: **{user_email}**")
 st.sidebar.write(f"Rol: **{rol.upper()}**")
 
-# Campo de texto para escribir el año libremente
 st.sidebar.divider()
 anio_input_raw = st.sidebar.text_input("🗓️ Escribir Año / Edición", value="2026")
 anio_edicion_actual = str(anio_input_raw).strip() if anio_input_raw.strip() else "2026"
@@ -437,10 +436,10 @@ if rol in ["admin", "referente"]:
         else:
             st.info(f"No hay proyectos cargados para la edición {anio_edicion_actual}.")
 
-    # --- TAB ASISTENCIA ---
+    # --- TAB ASISTENCIA Y REGLAS PARAMETRIZABLES DE CERTIFICACIÓN ---
     idx_asist = 2 if rol == "admin" else 1
     with tabs[idx_asist]:
-        st.subheader(f"Registro de Asistencia - Edición {anio_edicion_actual}")
+        st.subheader(f"Registro de Asistencia y Acreditación de Puntaje ({anio_edicion_actual})")
         
         if not df_proyectos.empty:
             st.markdown("##### 🔍 Búsqueda Avanzada de Proyectos / Docentes")
@@ -466,34 +465,92 @@ if rol in ["admin", "referente"]:
             proyecto_sel = mapa_proyectos[seleccion_label]
             
             st.divider()
-            col_regist, col_cond = st.columns([1, 1])
+            col_regist, col_cond = st.columns([1, 1.2])
             
             with col_regist:
-                st.markdown("##### 🎟️ Registrar Asistencia")
+                st.markdown("##### 🎟️ Registrar Asistencia Puntual")
                 st.write(f"**Proyecto:** `{proyecto_sel.get('id_doc')}` - {proyecto_sel.get('titulo')}")
                 st.write(f"**Docente Inscrito:** {proyecto_sel.get('docente_cargo')} (DNI: {proyecto_sel.get('docente_dni')})")
                 
                 docente_asistente = st.text_input("Nombre / DNI del Docente Asistente", value=f"{proyecto_sel.get('docente_cargo')} - {proyecto_sel.get('docente_dni')}")
-                cap_nom = st.selectbox("Instancia de Capacitación", ["Capacitación 1 - General", "Capacitación 2 - Metodología", "Capacitación 3 - Stand"])
+                cap_nom = st.selectbox("Instancia de Evaluación / Asistencia", [
+                    "Capacitación 1 - General", 
+                    "Capacitación 2 - Metodología", 
+                    "Feria de Ciencias - Instancia Exposición / Stand 1",
+                    "Feria de Ciencias - Instancia Exposición / Stand 2"
+                ])
                 pres = st.checkbox("Presente", value=True)
                 
-                if st.button("Guardar Asistencia", type="primary"):
+                if st.button("Guardar Registro de Asistencia", type="primary"):
                     guardar_asistencia(proyecto_sel.get('id_doc'), docente_asistente, cap_nom, pres, anio_edicion_actual)
                     st.toast("✅ Asistencia registrada", icon="💾")
                     st.success("Guardado con éxito en Firebase.")
 
             with col_cond:
-                st.markdown("##### 📜 Reglas de Certificación de Feria")
-                min_asist_proy = st.number_input("Capacitaciones mínimas por Proyecto", min_value=1, max_value=5, value=1)
+                st.markdown("##### 📜 Parámetros Configurables para Acreditación de Puntaje")
+                
+                c_req1, c_req2 = st.columns(2)
+                with c_req1:
+                    req_capacitaciones = st.number_input("Capacitaciones obligatorias", min_value=0, max_value=5, value=2)
+                with c_req2:
+                    req_instancias_feria = st.number_input("Instancias de Feria requeridas", min_value=0, max_value=5, value=1)
+                    
+                es_docente_unico_estricto = st.checkbox("Exigir 100% de asistencia si el proyecto tiene un Único Docente", value=True)
                 
                 df_asist_all = obtener_asistencias_cached()
                 if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
+                    st.markdown(f"**Historial del Proyecto `{proyecto_sel.get('id_doc')}`:**")
                     asist_proy = df_asist_all[df_asist_all["proyecto_id"] == proyecto_sel.get('id_doc')]
-                    st.markdown(f"**Historial de Asistencias del Proyecto `{proyecto_sel.get('id_doc')}`:**")
                     if not asist_proy.empty:
                         st.dataframe(asist_proy[["capacitacion", "docente", "presente", "fecha"]], use_container_width=True)
                     else:
-                        st.info("Sin asistencias registradas para este proyecto aún.")
+                        st.info("Sin registros de asistencia acumulados para este proyecto.")
+            
+            st.divider()
+            st.markdown("##### 📊 Reporte Global de Acreditación y Certificados de Puntaje")
+            
+            df_asist_all = obtener_asistencias_cached()
+            if not df_asist_all.empty and "proyecto_id" in df_asist_all.columns:
+                asist_validas = df_asist_all[df_asist_all["presente"] == True]
+                
+                # Agrupación de métricas de acreditación
+                resumen_cert = []
+                for _, p_row in df_proyectos.iterrows():
+                    p_id = p_row.get("id_doc")
+                    sub_a = asist_validas[asist_validas["proyecto_id"] == p_id]
+                    
+                    caps_asistidas = len(sub_a[sub_a["capacitacion"].str.contains("Capacitación", na=False)]["capacitacion"].unique())
+                    feria_asistida = len(sub_a[sub_a["capacitacion"].str.contains("Feria", na=False)]["capacitacion"].unique())
+                    
+                    cumple_caps = caps_asistidas >= req_capacitaciones
+                    cumple_feria = feria_asistida >= req_instancias_feria
+                    
+                    otorgar_puntaje = "SÍ" if (cumple_caps and cumple_feria) else "NO"
+                    
+                    resumen_cert.append({
+                        "ID Proyecto": p_id,
+                        "Título": p_row.get("titulo"),
+                        "Escuela": p_row.get("escuela_estandarizada"),
+                        "Docente": p_row.get("docente_cargo"),
+                        "Capacitaciones": f"{caps_asistidas}/{req_capacitaciones}",
+                        "Instancias Feria": f"{feria_asistida}/{req_instancias_feria}",
+                        "Acredita Puntaje": otorgar_puntaje
+                    })
+                    
+                df_resumen_cert = pd.DataFrame(resumen_cert)
+                st.dataframe(df_resumen_cert, use_container_width=True)
+                
+                # Descargar reporte especializado de acreditación
+                output_cert = io.BytesIO()
+                with pd.ExcelWriter(output_cert, engine='xlsxwriter') as writer_c:
+                    df_resumen_cert.to_excel(writer_c, sheet_name='Certificacion_Puntaje', index=False)
+                    
+                st.download_button(
+                    label=f"📥 Descargar Reporte Oficial de Acreditación y Certificados ({anio_edicion_actual}).xlsx",
+                    data=output_cert.getvalue(),
+                    file_name=f"Reporte_Certificacion_Puntaje_{anio_edicion_actual}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
     # --- TAB ASIGNACIÓN DE EVALUADORES Y DUPLAS ---
     idx_eval = 3 if rol == "admin" else 2
