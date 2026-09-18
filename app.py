@@ -44,14 +44,30 @@ def agrupar_nivel(nivel_raw):
         return "SECUNDARIA / SUPERIOR"
     return "OTRO"
 
+def normalizar_lista(val):
+    if isinstance(val, list):
+        return [str(x) for x in val if x]
+    elif pd.notna(val) and val:
+        return [str(val)]
+    return []
+
+def limpiar_nombre_campo(texto):
+    """Limpia los nombres de columnas del Excel para usar como claves de Firebase."""
+    return str(texto).strip().replace(".", "_").replace("/", "_").replace("[", "_").replace("]", "_")
+
 # ---------------------------------------------------------
 # 2. FUNCIONES DE BASE DE DATOS
 # ---------------------------------------------------------
 def obtener_proyectos():
     docs = db.collection("proyectos").stream()
-    df = pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
+    data = []
+    for doc in docs:
+        d = doc.to_dict() | {"id_doc": doc.id}
+        d["evaluadores_asignados"] = normalizar_lista(d.get("evaluadores_asignados"))
+        data.append(d)
+        
+    df = pd.DataFrame(data)
     
-    # Garantizar que existan las columnas clave para evitar errores KeyError
     if not df.empty:
         if "nivel_agrupado" not in df.columns:
             if "nivel_raw" in df.columns:
@@ -66,25 +82,35 @@ def obtener_proyectos():
 
 def obtener_proyectos_evaluador(email):
     docs = db.collection("proyectos").where("evaluadores_asignados", "array_contains", email).stream()
-    return [doc.to_dict() | {"id_doc": doc.id} for doc in docs]
+    proys = []
+    for doc in docs:
+        d = doc.to_dict() | {"id_doc": doc.id}
+        d["evaluadores_asignados"] = normalizar_lista(d.get("evaluadores_asignados"))
+        proys.append(d)
+    return proys
 
 def obtener_usuarios():
     docs = db.collection("Usuarios").stream()
     return pd.DataFrame([doc.to_dict() | {"id_doc": doc.id} for doc in docs])
 
 def registrar_usuario(email, password, rol, nivel_especialidad, dias_disponibles):
-    existe = db.collection("Usuarios").where("email", "==", email.strip().lower()).get()
-    if existe:
+    clean_email = email.strip().lower()
+    
+    # ID de documento sencillo basado en el correo
+    doc_id = clean_email.replace("@", "_at_").replace(".", "_")
+    doc_ref = db.collection("Usuarios").document(doc_id)
+    
+    if doc_ref.get().exists:
         return False, "El correo electrónico ya se encuentra registrado."
     
-    db.collection("Usuarios").add({
-        "email": email.strip().lower(),
+    doc_ref.set({
+        "email": clean_email,
         "password": password.strip(),
         "rol": rol,
         "nivel_especialidad": nivel_especialidad,
         "dias_disponibles": dias_disponibles
     })
-    return True, f"Usuario {email} creado correctamente."
+    return True, f"Usuario {clean_email} creado correctamente con ID: {doc_id}."
 
 def guardar_asistencia(proyecto_id, docente, capacitacion, presente):
     db.collection("asistencias").add({
@@ -175,6 +201,13 @@ def procesar_e_ingresar_csv(df):
         escuela_raw = row.get(c_escuela, "") if c_escuela else ""
         nivel_raw = row.get(c_nivel, "") if c_nivel else ""
         
+        # 1. Guardar todos los campos del Excel dinámicamente
+        datos_completos_excel = {}
+        for col in df.columns:
+            val = row.get(col)
+            datos_completos_excel[limpiar_nombre_campo(col)] = "" if pd.isna(val) else str(val).strip()
+
+        # 2. Estructura principal consolidada
         doc_data = {
             "titulo": str(row.get(c_titulo, "")).strip() if c_titulo else "Sin Título",
             "escuela_raw": str(escuela_raw),
@@ -191,7 +224,8 @@ def procesar_e_ingresar_csv(df):
             "evaluadores_asignados": [],
             "estado_evaluacion": "Pendiente",
             "devolucion": "",
-            "dia_evaluacion": ""
+            "dia_evaluacion": "",
+            "formulario_respuestas_completas": datos_completos_excel  # Todas las 127 columnas guardadas acá
         }
         
         batch.set(doc_ref, doc_data)
@@ -264,12 +298,12 @@ if rol in ["admin", "referente"]:
             if archivo_subido is not None:
                 try:
                     df_raw = pd.read_csv(archivo_subido) if archivo_subido.name.endswith('.csv') else pd.read_excel(archivo_subido)
-                    st.write(f"📁 **Archivo detectado:** `{archivo_subido.name}` con **{len(df_raw)}** filas.")
+                    st.write(f"📁 **Archivo detectado:** `{archivo_subido.name}` con **{len(df_raw)}** filas y **{len(df_raw.columns)}** columnas.")
                     
                     if st.button("🚀 Confirmar e Importar a Firebase", type="primary"):
-                        with st.spinner("Procesando proyectos..."):
+                        with st.spinner("Procesando proyectos y guardando todas las columnas en Firebase..."):
                             total_cargados = procesar_e_ingresar_csv(df_raw)
-                            st.success(f"Se importaron {total_cargados} proyectos con éxito.")
+                            st.success(f"Se importaron {total_cargados} proyectos con sus datos completos.")
                             st.rerun()
                 except Exception as e:
                     st.error(f"Error al procesar el archivo: {e}")
@@ -302,6 +336,8 @@ if rol in ["admin", "referente"]:
 
             for idx, p in df_cards.iterrows():
                 with st.expander(f"🏷️ [{p.get('id_doc')}] {p.get('titulo', 'Sin Título')} | Nivel: {p.get('nivel_agrupado', 'N/A')}"):
+                    evals = normalizar_lista(p.get('evaluadores_asignados'))
+                    
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"**Escuela:** {p.get('escuela_estandarizada', 'N/A')}")
@@ -309,7 +345,7 @@ if rol in ["admin", "referente"]:
                         st.markdown(f"**Nivel Original:** {p.get('nivel_raw', p.get('nivel', 'N/A'))}")
                         st.markdown(f"**Docente a Cargo:** {p.get('docente_cargo', 'N/A')} ({p.get('docente_email', 'N/A')})")
                     with c2:
-                        st.markdown(f"**Evaluadores Asignados:** {', '.join(p.get('evaluadores_asignados', [])) if p.get('evaluadores_asignados') else '⚠️ Sin Asignar'}")
+                        st.markdown(f"**Evaluadores Asignados:** {', '.join(evals) if evals else '⚠️ Sin Asignar'}")
                         st.markdown(f"**Día de Evaluación:** {p.get('dia_evaluacion', 'Sin Definir')}")
                         st.markdown(f"**Estado de Evaluación:** {p.get('estado_evaluacion', 'Pendiente')}")
                     
@@ -323,6 +359,11 @@ if rol in ["admin", "referente"]:
                     if p.get('youtube_url'):
                         r2.markdown(f"🎬 [Ver Video en YouTube]({p.get('youtube_url')})")
                     
+                    # Ver todas las respuestas del formulario
+                    if p.get('formulario_respuestas_completas'):
+                        with st.popover("📋 Ver todas las respuestas del formulario (127 campos)"):
+                            st.json(p.get('formulario_respuestas_completas'))
+
                     if rol == "admin" and p.get('devolucion'):
                         st.markdown("**Devolución Cualitativa de Evaluación:**")
                         st.success(p.get('devolucion'))
@@ -383,9 +424,7 @@ if rol in ["admin", "referente"]:
                 if not df_users.empty and "rol" in df_users.columns:
                     evaluadores_list = df_users[df_users["rol"] == "evaluador"]["email"].tolist()
                 
-                evals_actuales = p_selected.get('evaluadores_asignados', [])
-                if not isinstance(evals_actuales, list):
-                    evals_actuales = []
+                evals_actuales = normalizar_lista(p_selected.get('evaluadores_asignados'))
 
                 evals_seleccionados = st.multiselect(
                     "Seleccionar Evaluadores (Dupla o Trieja)", 
@@ -472,10 +511,10 @@ if rol in ["admin", "referente"]:
                         st.warning("Completar todos los campos obligatorios.")
                         
             with col_u2:
-                st.markdown("##### 📋 Nomina de Evaluadores y Registrados")
+                st.markdown("##### 📋 Nómina de Evaluadores y Registrados")
                 df_usuarios = obtener_usuarios()
                 if not df_usuarios.empty:
-                    cols_usr = [c for c in ["email", "rol", "nivel_especialidad", "dias_disponibles"] if c in df_usuarios.columns]
+                    cols_usr = [c for c in ["id_doc", "email", "rol", "nivel_especialidad", "dias_disponibles"] if c in df_usuarios.columns]
                     st.dataframe(df_usuarios[cols_usr], use_container_width=True)
 
 # --- VISTA: EVALUADOR ---
@@ -487,9 +526,11 @@ elif rol == "evaluador":
         st.info(f"Tenés **{len(proyectos)}** proyecto(s) asignado(s) para evaluar.")
         for p in proyectos:
             with st.expander(f"📌 [{p.get('id_doc')}] {p.get('titulo', 'Sin Título')}"):
+                evals = normalizar_lista(p.get('evaluadores_asignados'))
+                
                 st.write(f"**Nivel Educativo:** {p.get('nivel_agrupado', 'N/A')}")
                 st.write(f"**Escuela:** {p.get('escuela_estandarizada', 'N/A')}")
-                st.write(f"**Evaluadores del Equipo:** {', '.join(p.get('evaluadores_asignados', []))}")
+                st.write(f"**Evaluadores del Equipo:** {', '.join(evals)}")
                 
                 st.markdown("**Resumen:**")
                 st.info(p.get('resumen', 'Sin resumen cargado.'))
